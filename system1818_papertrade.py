@@ -465,6 +465,10 @@ def run_cycle():
     """Called every refresh. Fetches data, classifies, generates signals, updates trades."""
     phase = get_phase()
     vix   = fetch_vix()
+    # Example of how to access the returned data
+result = generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase)
+reason = result["reason"] # This gives you the string to show in your dashboard
+signal = result["signal"] # This is the object you pass to your paper_enter function
 
     for symbol, ticker in SYMBOLS.items():
         df = fetch_candles(ticker, period="2d", interval="1m")
