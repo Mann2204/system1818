@@ -350,10 +350,6 @@ elif regime == 3:
             sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
             reasoning = f"R4 Quiet: Slope {slope:+.4f}, VIX {vix:.1f}. Buying ATM {strike} PUT."
 
-    # Reject R1/R3 regimes (Range/Volatile)
-    if direction is None:
-        return None
-
     return {
         "symbol":     symbol,
         "direction":  direction,
