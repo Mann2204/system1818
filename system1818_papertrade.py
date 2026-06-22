@@ -272,65 +272,69 @@ def classify_regime(vix, adx, pcr, slope, vol):
 # ─────────────────────────────────────────────────────────────
 # SIGNAL GENERATOR (rule-based)
 # ─────────────────────────────────────────────────────────────
-def generate_signal(symbol, spot, regime, adx, vix, slope, vol, phase):
+def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
     """
-    Generates trading signals based on regime-specific rules.
-    Includes Mean Reversion (R1, R3) and Trend Following (R2, R4).
+    Generates signals for NIFTY/BANKNIFTY with detailed reasoning.
     """
     if not can_trade(phase):
-        return None
+        return {"signal": None, "reason": "Market phase inactive or locked."}
 
-    # Constants
-    lot = LOT_SIZE[symbol]
-    step = 50 if symbol == "NIFTY" else 100
+    # Dynamic adjustment for symbols
+    lot = LOT_SIZE.get(symbol, 50)
+    step = 100 if symbol == "BANKNIFTY" else 50
     atm = round(spot / step) * step
     
-    direction, strike, sl_points, reasoning = None, None, None, ""
+    direction, strike, sl_points = None, None, None
+    reasoning = ""
 
     # ─────────────────────────────────────────────────────────────
-    # TREND FOLLOWING (Regimes 2 & 4)
+    # TREND STRATEGIES (Regimes 2 & 4)
     # ─────────────────────────────────────────────────────────────
     if regime == 2 and vol > 150 and adx > 25:
         direction = "CALL" if slope > 0 else "PUT"
         strike = atm + (step if direction == "CALL" else -step)
         sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
-        reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Trade: {direction}"
+        reasoning = f"R2 Momentum ({symbol}): Vol {vol:.0f}%, ADX {adx:.1f}. Trade: {direction}"
         
     elif regime == 4 and abs(slope) > 0.1:
         direction = "CALL" if slope > 0.1 else "PUT"
         strike = atm
         sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
-        reasoning = f"R4 Quiet Trend: Slope {slope:+.4f}, VIX {vix:.1f}. Trade: {direction}"
+        reasoning = f"R4 Quiet Trend ({symbol}): Slope {slope:+.4f}. Trade: {direction}"
 
     # ─────────────────────────────────────────────────────────────
-    # MEAN REVERSION (Regimes 1 & 3)
+    # MEAN REVERSION STRATEGIES (Regimes 1 & 3)
     # ─────────────────────────────────────────────────────────────
-    elif regime == 1 and abs(slope) > 0.05: # R1: Range Quiet
+    elif regime == 1 and abs(slope) > 0.05:
         direction = "CALL" if slope < -0.05 else "PUT"
         strike = atm + (step if direction == "CALL" else -step)
-        sl_points = 8.0 
-        reasoning = f"R1 Range: Bounce at support/res. Trade: {direction}"
+        sl_points = 8.0
+        reasoning = f"R1 Range ({symbol}): Bounce at support/res. Trade: {direction}"
 
-    elif regime == 3 and abs(slope) > 0.2: # R3: Range Volatile
+    elif regime == 3 and abs(slope) > 0.2:
         direction = "CALL" if slope < -0.2 else "PUT"
         strike = atm + (step if direction == "CALL" else -step)
-        sl_points = 12.0 
-        reasoning = f"R3 Volatile: Mean reversion on slope {slope:+.4f}. Trade: {direction}"
+        sl_points = 12.0
+        reasoning = f"R3 Volatile ({symbol}): Mean reversion at extreme. Trade: {direction}"
 
-    # Return structured result if a signal was generated
+    # ─────────────────────────────────────────────────────────────
+    # FINAL OUTPUT
+    # ─────────────────────────────────────────────────────────────
     if direction:
         return {
-            "symbol": symbol,
-            "direction": direction,
-            "strike": strike,
-            "sl_points": sl_points,
-            "regime": regime,
-            "spot_entry": spot,
-            "reasoning": reasoning,
-            "ts": datetime.now(IST).strftime("%H:%M:%S")
+            "signal": {
+                "symbol": symbol,
+                "direction": direction,
+                "strike": strike,
+                "sl_points": sl_points,
+                "regime": regime,
+                "spot_entry": spot,
+                "ts": datetime.now(IST).strftime("%H:%M:%S")
+            },
+            "reason": reasoning
         }
     
-    return None
+    return {"signal": None, "reason": f"No trade: {symbol} conditions in R{regime} not met."}
 
 # ─────────────────────────────────────────────────────────────
 # POSITION SIZING
