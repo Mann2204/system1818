@@ -274,56 +274,64 @@ def classify_regime(vix, adx, pcr, slope, vol):
 # ─────────────────────────────────────────────────────────────
 def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
     """
-    Enhanced signal generator that returns a rationale for every decision.
+    Generates trading signals based on regime-specific rules.
+    Returns a dict with signal details or None.
     """
+    # Verify trading phase
     if not can_trade(phase):
-        return {"signal": None, "reason": "Market phase inactive or locked."}
+        return None
 
     direction = None
-    reasoning = "Waiting for market conditions to align with strategy rules."
+    sl_points = None
+    reasoning = ""
 
-    # Logic for Regime Rejection
-    if regime not in [2, 4]:
-        return {"signal": None, "reason": f"Regime {regime} is not optimized for trend following. Standing aside."}
-    
-    # Logic for Trend Momentum (R2)
+    lot = LOT_SIZE[symbol]
+    step = 50 if symbol == "NIFTY" else 100
+    atm = round(spot / step) * step
+
+    # RULE SET: Regime 2 (Trend Momentum)
+    # CALL: Rising slope, high volume (>150%), strong trend (ADX > 25)
+    # PUT: Falling slope, high volume (>150%), strong trend (ADX > 25)
     if regime == 2:
-        if vol < 150:
-            return {"signal": None, "reason": f"Insufficient volume ({vol:.0f}%). Needs > 150% for momentum."}
-        if adx < 25:
-            return {"signal": None, "reason": f"Trend strength (ADX {adx:.1f}) below threshold of 25."}
-        if slope > 0:
+        if slope > 0 and vol > 150 and adx > 25:
             direction = "CALL"
-        elif slope < 0:
+            strike    = atm + step
+            sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
+            reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Buying {strike} CALL."
+        elif slope < 0 and vol > 150 and adx > 25:
             direction = "PUT"
-            
-    # Logic for Trend Quiet (R4)
+            strike    = atm - step
+            sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
+            reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Buying {strike} PUT."
+
+    # RULE SET: Regime 4 (Trend Quiet)
+    # Logic: Lower volatility trend grinding with 20-EMA slope
     elif regime == 4:
-        if abs(slope) < 0.1:
-            return {"signal": None, "reason": f"Price movement (Slope {slope:+.4f}) too stagnant for R4 strategy."}
         if slope > 0.1:
             direction = "CALL"
+            strike    = atm
+            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
+            reasoning = f"R4 Quiet: Slope {slope:+.4f}, VIX {vix:.1f}. Buying ATM {strike} CALL."
         elif slope < -0.1:
             direction = "PUT"
+            strike    = atm
+            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
+            reasoning = f"R4 Quiet: Slope {slope:+.4f}, VIX {vix:.1f}. Buying ATM {strike} PUT."
 
-    if direction:
-        reasoning = f"Signal {direction} generated. Regime {regime} confirmed. ADX: {adx:.1f}, Vol: {vol:.0f}%, Slope: {slope:+.4f}."
-        return {
-            "signal": {
-                "symbol": symbol,
-                "direction": direction,
-                "strike": strike,
-                "sl_points": sl_points,
-                "regime": regime,
-                "spot_entry": spot,
-                "reasoning": reasoning,
-                "ts": datetime.now(IST).strftime("%H:%M:%S")
-            },
-            "reason": reasoning
-        }
-        }
-    
-    return {"signal": None, "reason": "Technical conditions did not trigger a buy/sell signal."}
+    # Reject R1/R3 regimes (Range/Volatile)
+    if direction is None:
+        return None
+
+    return {
+        "symbol":     symbol,
+        "direction":  direction,
+        "strike":     strike,
+        "sl_points":  sl_points,
+        "regime":     regime,
+        "spot_entry": spot,
+        "reasoning":  reasoning,
+        "ts":         datetime.now(IST).strftime("%H:%M:%S"),
+    }
 
 # ─────────────────────────────────────────────────────────────
 # POSITION SIZING
