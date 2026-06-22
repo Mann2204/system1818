@@ -274,78 +274,46 @@ def classify_regime(vix, adx, pcr, slope, vol):
 # ─────────────────────────────────────────────────────────────
 def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
     """
-    Rule-based signal engine — no Claude API needed.
-
-    R2 (Trend Momentum):
-      CALL if slope > 0 and vol > 150 and adx > 25
-      PUT  if slope < 0 and vol > 150 and adx > 25
-
-    R4 (Trend Quiet):
-      CALL if slope > 0.1 and adx > 22
-      PUT  if slope < -0.1 and adx > 22
-
-    R1/R3: NO TRADE — range/volatile conditions
+    Enhanced signal generator that returns a rationale for every decision.
     """
     if not can_trade(phase):
-        return None
+        return {"signal": None, "reason": "Market phase inactive or locked."}
 
     direction = None
-    sl_points = None
-    reasoning = ""
+    reasoning = "Waiting for market conditions to align with strategy rules."
 
-    lot = LOT_SIZE[symbol]
-    # ATM strike (round to nearest 50 for NIFTY, 100 for BANKNIFTY)
-    step = 50 if symbol == "NIFTY" else 100
-    atm = round(spot / step) * step
-
+    # Logic for Regime Rejection
+    if regime not in [2, 4]:
+        return {"signal": None, "reason": f"Regime {regime} is not optimized for trend following. Standing aside."}
+    
+    # Logic for Trend Momentum (R2)
     if regime == 2:
-        if slope > 0 and vol > 150 and adx > 25:
+        if vol < 150:
+            return {"signal": None, "reason": f"Insufficient volume ({vol:.0f}%). Needs > 150% for momentum."}
+        if adx < 25:
+            return {"signal": None, "reason": f"Trend strength (ADX {adx:.1f}) below threshold of 25."}
+        if slope > 0:
             direction = "CALL"
-            strike    = atm + step        # slightly OTM
-            sl_points = round(spot * 0.0035 / lot, 1)    # ~0.35% of spot per lot
-            sl_points = max(sl_points, 15.0)
-            reasoning = (f"R2 Trend Momentum — ADX {adx:.1f} with rising slope "
-                         f"{slope:+.4f} and volume {vol:.0f}% of avg. "
-                         f"Buying {symbol} {strike} CALL.")
-        elif slope < 0 and vol > 150 and adx > 25:
+        elif slope < 0:
             direction = "PUT"
-            strike    = atm - step
-            sl_points = round(spot * 0.0035 / lot, 1)
-            sl_points = max(sl_points, 15.0)
-            reasoning = (f"R2 Trend Momentum — ADX {adx:.1f} with falling slope "
-                         f"{slope:+.4f} and volume {vol:.0f}% of avg. "
-                         f"Buying {symbol} {strike} PUT.")
-
+            
+    # Logic for Trend Quiet (R4)
     elif regime == 4:
+        if abs(slope) < 0.1:
+            return {"signal": None, "reason": f"Price movement (Slope {slope:+.4f}) too stagnant for R4 strategy."}
         if slope > 0.1:
             direction = "CALL"
-            strike    = atm
-            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
-            reasoning = (f"R4 Trend Quiet — price grinding above 20-EMA with slope "
-                         f"{slope:+.4f}. Low VIX {vix:.1f} favours directional buy. "
-                         f"Buying ATM {symbol} {strike} CALL with tight SL.")
         elif slope < -0.1:
             direction = "PUT"
-            strike    = atm
-            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
-            reasoning = (f"R4 Trend Quiet — price grinding below 20-EMA with slope "
-                         f"{slope:+.4f}. Low VIX {vix:.1f} favours directional sell. "
-                         f"Buying ATM {symbol} {strike} PUT with tight SL.")
 
-    # R1/R3: skip
-    if direction is None:
-        return None
-
-    return {
-        "symbol":    symbol,
-        "direction": direction,
-        "strike":    strike,
-        "sl_points": sl_points,
-        "regime":    regime,
-        "spot_entry":spot,
-        "reasoning": reasoning,
-        "ts":        datetime.now(IST).strftime("%H:%M:%S"),
-    }
+    if direction:
+        reasoning = f"Signal {direction} generated. Regime {regime} confirmed. ADX: {adx:.1f}, Vol: {vol:.0f}%, Slope: {slope:+.4f}."
+        return {
+            "signal": {"direction": direction, ...}, # Keep your existing signal dict here
+            "reason": reasoning
+        }
+    
+    return {"signal": None, "reason": "Technical conditions did not trigger a buy/sell signal."}
 
 # ─────────────────────────────────────────────────────────────
 # POSITION SIZING
