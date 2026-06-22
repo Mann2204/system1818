@@ -289,6 +289,21 @@ def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
     step = 50 if symbol == "NIFTY" else 100
     atm = round(spot / step) * step
 
+    elif regime == 1:
+        # Range Trading Logic: Sell at Resistance, Buy at Support
+        # In a real setup, you would use Bollinger Bands or RSI
+        # Here we use the price proximity to the mean as a proxy
+        if slope < -0.05:  # Price hit the bottom of the range
+            direction = "CALL"
+            strike    = atm - step
+            sl_points = max(round(spot * 0.0015 / lot, 1), 8.0)
+            reasoning = f"R1 Range Trading: Price at support (Slope {slope:+.4f}). Buying {strike} CALL."
+        elif slope > 0.05: # Price hit the top of the range
+            direction = "PUT"
+            strike    = atm + step
+            sl_points = max(round(spot * 0.0015 / lot, 1), 8.0)
+            reasoning = f"R1 Range Trading: Price at resistance (Slope {slope:+.4f}). Buying {strike} PUT."
+            
     # RULE SET: Regime 2 (Trend Momentum)
     # CALL: Rising slope, high volume (>150%), strong trend (ADX > 25)
     # PUT: Falling slope, high volume (>150%), strong trend (ADX > 25)
@@ -303,6 +318,23 @@ def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
             strike    = atm - step
             sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
             reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Buying {strike} PUT."
+
+elif regime == 3:
+        # Mean Reversion Logic: Trade the reversal at extremes
+        # We define extremes using the slope (velocity of price change)
+        # If the slope is too steep, it suggests an exhaustion move
+        if slope < -0.2:  # Oversold: Price dropped too fast
+            direction = "CALL"
+            strike    = atm - step
+            sl_points = max(round(spot * 0.0025 / lot, 1), 10.0)
+            reasoning = (f"R3 Mean Reversion: Extreme drop (Slope {slope:+.4f}). "
+                         f"Market oversold, buying {strike} CALL.")
+        elif slope > 0.2:  # Overbought: Price rose too fast
+            direction = "PUT"
+            strike    = atm + step
+            sl_points = max(round(spot * 0.0025 / lot, 1), 10.0)
+            reasoning = (f"R3 Mean Reversion: Extreme rise (Slope {slope:+.4f}). "
+                         f"Market overbought, buying {strike} PUT.")
 
     # RULE SET: Regime 4 (Trend Quiet)
     # Logic: Lower volatility trend grinding with 20-EMA slope
