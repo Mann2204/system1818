@@ -181,7 +181,7 @@ def fetch_vix():
                          progress=False, auto_adjust=True)
         if df.empty:
             return 14.0
-        return float(df["Close"].iloc[-1])
+        return float(df["Close"].iloc[-1].item())
     except:
         return 14.0
 
@@ -211,7 +211,7 @@ def compute_adx(df, period=14):
         di_m   = 100 * dm_minus.ewm(alpha=1/period, adjust=False).mean() / atr
         dx     = (100 * (di_p - di_m).abs() / (di_p + di_m + 1e-9))
         adx    = dx.ewm(alpha=1/period, adjust=False).mean()
-        return float(adx.iloc[-1])
+        return float(adx.iloc[-1].item())
     except:
         return 20.0
 
@@ -221,7 +221,7 @@ def compute_ema_slope(df, period=20):
         close = df["Close"].squeeze()
         ema   = close.ewm(span=period, adjust=False).mean()
         slope = (ema.iloc[-1] - ema.iloc[-2]) / ema.iloc[-2]
-        return float(slope)
+        return float(slope.item() if hasattr(slope, 'item') else slope)
     except:
         return 0.0
 
@@ -230,7 +230,7 @@ def compute_volume_ratio(df, period=20):
     try:
         vol = df["Volume"].squeeze()
         avg = vol.rolling(period).mean()
-        ratio = float(vol.iloc[-1] / avg.iloc[-1]) * 100
+        ratio = float(vol.iloc[-1].item() / avg.iloc[-1].item()) * 100
         return min(ratio, 500.0)
     except:
         return 100.0
@@ -482,7 +482,7 @@ def run_cycle():
         if df is None or len(df) < 21:
             continue
 
-        spot  = float(df["Close"].iloc[-1])
+        spot  = spot = float(df["Close"].iloc[-1].item())
         adx   = compute_adx(df)
         slope = compute_ema_slope(df)
         vol   = compute_volume_ratio(df)
