@@ -309,8 +309,18 @@ def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
     if direction:
         reasoning = f"Signal {direction} generated. Regime {regime} confirmed. ADX: {adx:.1f}, Vol: {vol:.0f}%, Slope: {slope:+.4f}."
         return {
-            "signal": {"direction": direction, ...}, # Keep your existing signal dict here
+            "signal": {
+                "symbol": symbol,
+                "direction": direction,
+                "strike": strike,
+                "sl_points": sl_points,
+                "regime": regime,
+                "spot_entry": spot,
+                "reasoning": reasoning,
+                "ts": datetime.now(IST).strftime("%H:%M:%S")
+            },
             "reason": reasoning
+        }
         }
     
     return {"signal": None, "reason": "Technical conditions did not trigger a buy/sell signal."}
