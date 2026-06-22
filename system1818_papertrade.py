@@ -272,94 +272,54 @@ def classify_regime(vix, adx, pcr, slope, vol):
 # ─────────────────────────────────────────────────────────────
 # SIGNAL GENERATOR (rule-based)
 # ─────────────────────────────────────────────────────────────
-def generate_signal(symbol, spot, regime, adx, vix, pcr, slope, vol, phase):
-    """
-    Generates trading signals based on regime-specific rules.
-    Returns a dict with signal details or None.
-    """
-    # Verify trading phase
+def generate_signal(symbol, spot, regime, adx, vix, slope, vol, phase):
     if not can_trade(phase):
         return None
 
-    direction = None
-    sl_points = None
-    reasoning = ""
-
+    # Constants
     lot = LOT_SIZE[symbol]
     step = 50 if symbol == "NIFTY" else 100
     atm = round(spot / step) * step
+    
+    direction, strike, sl_points, reasoning = None, None, None, ""
 
-    elif regime == 1:
-        # Range Trading Logic: Sell at Resistance, Buy at Support
-        # In a real setup, you would use Bollinger Bands or RSI
-        # Here we use the price proximity to the mean as a proxy
-        if slope < -0.05:  # Price hit the bottom of the range
-            direction = "CALL"
-            strike    = atm - step
-            sl_points = max(round(spot * 0.0015 / lot, 1), 8.0)
-            reasoning = f"R1 Range Trading: Price at support (Slope {slope:+.4f}). Buying {strike} CALL."
-        elif slope > 0.05: # Price hit the top of the range
-            direction = "PUT"
-            strike    = atm + step
-            sl_points = max(round(spot * 0.0015 / lot, 1), 8.0)
-            reasoning = f"R1 Range Trading: Price at resistance (Slope {slope:+.4f}). Buying {strike} PUT."
-            
-    # RULE SET: Regime 2 (Trend Momentum)
-    # CALL: Rising slope, high volume (>150%), strong trend (ADX > 25)
-    # PUT: Falling slope, high volume (>150%), strong trend (ADX > 25)
-    if regime == 2:
-        if slope > 0 and vol > 150 and adx > 25:
-            direction = "CALL"
-            strike    = atm + step
-            sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
-            reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Buying {strike} CALL."
-        elif slope < 0 and vol > 150 and adx > 25:
-            direction = "PUT"
-            strike    = atm - step
-            sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
-            reasoning = f"R2 Momentum: Vol {vol:.0f}%, ADX {adx:.1f}, Slope {slope:+.4f}. Buying {strike} PUT."
+    # ─────────────────────────────────────────────────────────────
+    # TREND FOLLOWING (Regimes 2 & 4)
+    # ─────────────────────────────────────────────────────────────
+    if regime == 2 and vol > 150 and adx > 25:
+        direction = "CALL" if slope > 0 else "PUT"
+        strike = atm + (step if direction == "CALL" else -step)
+        sl_points = max(round(spot * 0.0035 / lot, 1), 15.0)
+        reasoning = f"R2 Trend: Vol {vol:.0f}%, ADX {adx:.1f}. Trade: {direction}"
+        
+    elif regime == 4 and abs(slope) > 0.1:
+        direction = "CALL" if slope > 0.1 else "PUT"
+        strike = atm
+        sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
+        reasoning = f"R4 Quiet Trend: Slope {slope:+.4f}. Trade: {direction}"
 
-elif regime == 3:
-        # Mean Reversion Logic: Trade the reversal at extremes
-        # We define extremes using the slope (velocity of price change)
-        # If the slope is too steep, it suggests an exhaustion move
-        if slope < -0.2:  # Oversold: Price dropped too fast
-            direction = "CALL"
-            strike    = atm - step
-            sl_points = max(round(spot * 0.0025 / lot, 1), 10.0)
-            reasoning = (f"R3 Mean Reversion: Extreme drop (Slope {slope:+.4f}). "
-                         f"Market oversold, buying {strike} CALL.")
-        elif slope > 0.2:  # Overbought: Price rose too fast
-            direction = "PUT"
-            strike    = atm + step
-            sl_points = max(round(spot * 0.0025 / lot, 1), 10.0)
-            reasoning = (f"R3 Mean Reversion: Extreme rise (Slope {slope:+.4f}). "
-                         f"Market overbought, buying {strike} PUT.")
+    # ─────────────────────────────────────────────────────────────
+    # MEAN REVERSION (Regimes 1 & 3)
+    # ─────────────────────────────────────────────────────────────
+    elif regime == 1 and abs(slope) > 0.05: # R1: Range Quiet
+        direction = "CALL" if slope < -0.05 else "PUT"
+        strike = atm + (step if direction == "CALL" else -step)
+        sl_points = 8.0 # Tight stop for quiet range
+        reasoning = f"R1 Range: Support/Resistance bounce. Trade: {direction}"
 
-    # RULE SET: Regime 4 (Trend Quiet)
-    # Logic: Lower volatility trend grinding with 20-EMA slope
-    elif regime == 4:
-        if slope > 0.1:
-            direction = "CALL"
-            strike    = atm
-            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
-            reasoning = f"R4 Quiet: Slope {slope:+.4f}, VIX {vix:.1f}. Buying ATM {strike} CALL."
-        elif slope < -0.1:
-            direction = "PUT"
-            strike    = atm
-            sl_points = max(round(spot * 0.002 / lot, 1), 12.0)
-            reasoning = f"R4 Quiet: Slope {slope:+.4f}, VIX {vix:.1f}. Buying ATM {strike} PUT."
+    elif regime == 3 and abs(slope) > 0.2: # R3: Range Volatile
+        direction = "CALL" if slope < -0.2 else "PUT"
+        strike = atm + (step if direction == "CALL" else -step)
+        sl_points = 12.0 # Wider stop for volatility
+        reasoning = f"R3 Volatile: Mean reversion on extreme slope {slope:+.4f}. Trade: {direction}"
 
-    return {
-        "symbol":     symbol,
-        "direction":  direction,
-        "strike":     strike,
-        "sl_points":  sl_points,
-        "regime":     regime,
-        "spot_entry": spot,
-        "reasoning":  reasoning,
-        "ts":         datetime.now(IST).strftime("%H:%M:%S"),
-    }
+    if direction:
+        return {
+            "symbol": symbol, "direction": direction, "strike": strike,
+            "sl_points": sl_points, "regime": regime, "spot_entry": spot,
+            "reasoning": reasoning, "ts": datetime.now(IST).strftime("%H:%M:%S")
+        }
+    return None
 
 # ─────────────────────────────────────────────────────────────
 # POSITION SIZING
