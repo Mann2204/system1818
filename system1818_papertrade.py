@@ -17,6 +17,7 @@ requirements.txt contents:
     pandas
     numpy
     pytz
+    plotly
 """
 
 import streamlit as st
@@ -27,7 +28,8 @@ from datetime import datetime, time as dtime
 import math
 import time
 import pytz
-import streamlit.components.v1 as components
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -802,90 +804,193 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── TradingView Charts ────────────────────────────────────────
-st.markdown('<div class="section-lbl">TradingView Live Charts</div>', unsafe_allow_html=True)
+# ── Live Charts (Plotly + yfinance) ──────────────────────────
+st.markdown('<div class="section-lbl">Live Charts — NIFTY & BANK NIFTY</div>', unsafe_allow_html=True)
 
-tv_interval_map = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "1h": "60", "1D": "D"}
-tc1, tc2 = st.columns([3, 1])
-with tc2:
-    tv_interval = st.selectbox(
-        "Interval", list(tv_interval_map.keys()), index=2, label_visibility="collapsed"
+CHART_INTERVALS = {
+    "1m":  {"period": "1d",  "interval": "1m"},
+    "5m":  {"period": "5d",  "interval": "5m"},
+    "15m": {"period": "5d",  "interval": "15m"},
+    "1h":  {"period": "1mo", "interval": "60m"},
+    "1D":  {"period": "6mo", "interval": "1d"},
+}
+
+@st.cache_data(ttl=60)
+def fetch_chart_data(ticker: str, period: str, interval: str) -> pd.DataFrame | None:
+    try:
+        df = yf.download(ticker, period=period, interval=interval,
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 5:
+            return None
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert(IST)
+        # Flatten MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception:
+        return None
+
+def build_chart(df: pd.DataFrame, title: str, regime_color: str) -> go.Figure:
+    """
+    Candlestick + Volume + 20-EMA + RSI in a single Plotly figure.
+    Three row layout: candlestick (60%), volume (20%), RSI (20%).
+    """
+    close  = df["Close"].squeeze()
+    ema20  = close.ewm(span=20, adjust=False).mean()
+
+    # RSI-14
+    delta  = close.diff()
+    gain   = delta.clip(lower=0).rolling(14).mean()
+    loss   = (-delta.clip(upper=0)).rolling(14).mean()
+    rsi    = 100 - 100 / (1 + gain / (loss + 1e-9))
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.60, 0.20, 0.20],
+        vertical_spacing=0.02,
     )
-iv = tv_interval_map[tv_interval]
+
+    # ── Candlesticks ──
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"].squeeze(),
+        high=df["High"].squeeze(),
+        low=df["Low"].squeeze(),
+        close=close,
+        name="Price",
+        increasing_line_color="#33FF99",
+        decreasing_line_color="#FF4D4D",
+        increasing_fillcolor="#33FF9966",
+        decreasing_fillcolor="#FF4D4D66",
+        line_width=1,
+    ), row=1, col=1)
+
+    # ── 20-EMA ──
+    fig.add_trace(go.Scatter(
+        x=df.index, y=ema20,
+        name="EMA 20",
+        line=dict(color="#FFC93B", width=1.2, dash="dot"),
+    ), row=1, col=1)
+
+    # ── Volume bars ──
+    vol_colors = [
+        "#33FF9966" if c >= o else "#FF4D4D66"
+        for c, o in zip(df["Close"].squeeze(), df["Open"].squeeze())
+    ]
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df["Volume"].squeeze(),
+        name="Volume",
+        marker_color=vol_colors,
+        showlegend=False,
+    ), row=2, col=1)
+
+    # ── RSI ──
+    fig.add_trace(go.Scatter(
+        x=df.index, y=rsi,
+        name="RSI 14",
+        line=dict(color="#3BA7FF", width=1.2),
+        showlegend=False,
+    ), row=3, col=1)
+    fig.add_hline(y=70, line_color="#FF4D4D", line_dash="dash", line_width=0.7, row=3, col=1)
+    fig.add_hline(y=30, line_color="#33FF99", line_dash="dash", line_width=0.7, row=3, col=1)
+
+    # ── Layout ──
+    fig.update_layout(
+        title=dict(
+            text=title,
+            font=dict(family="JetBrains Mono", size=13, color=regime_color),
+            x=0.01,
+        ),
+        paper_bgcolor="#060a0f",
+        plot_bgcolor="#0d1117",
+        font=dict(family="JetBrains Mono", color="#8b949e", size=10),
+        xaxis_rangeslider_visible=False,
+        height=480,
+        margin=dict(l=10, r=10, t=36, b=10),
+        legend=dict(
+            orientation="h", x=0.01, y=1.02,
+            font=dict(size=9), bgcolor="rgba(0,0,0,0)",
+        ),
+        hovermode="x unified",
+    )
+    for row in [1, 2, 3]:
+        fig.update_xaxes(
+            gridcolor="#1c2333", showgrid=True,
+            zeroline=False, row=row, col=1,
+        )
+        fig.update_yaxes(
+            gridcolor="#1c2333", showgrid=True,
+            zeroline=False, row=row, col=1,
+        )
+    fig.update_yaxes(title_text="RSI", row=3, col=1,
+                     range=[0, 100], title_font=dict(size=9))
+    fig.update_yaxes(title_text="Vol",  row=2, col=1, title_font=dict(size=9))
+    return fig
+
+# Interval selector
+ci1, ci2 = st.columns([4, 1])
+with ci2:
+    chart_interval = st.selectbox(
+        "Chart Interval",
+        list(CHART_INTERVALS.keys()),
+        index=1,
+        label_visibility="collapsed",
+    )
+cfg = CHART_INTERVALS[chart_interval]
 
 chart_col1, chart_col2 = st.columns(2)
 
-def tv_chart_html(symbol: str, container_id: str, interval: str) -> str:
-    """
-    Build a TradingView Advanced Chart using new TradingView.widget() constructor.
-    This avoids passing a JSON blob through a Python f-string, which corrupts
-    booleans (True/False vs true/false) and causes TradingView to fall back to AAPL.
-    All values are JS literals — no JSON serialisation involved.
-    """
-    return f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    body {{ margin:0; padding:0; background:#060a0f; }}
-    #tv_label {{
-      font-family:'JetBrains Mono',monospace;
-      font-size:0.68rem; color:#3BA7FF;
-      letter-spacing:2px; padding:6px 10px;
-    }}
-    #{container_id} {{ width:100%; height:400px; }}
-  </style>
-</head>
-<body>
-  <div id="{container_id}"></div>
-  <script src="https://s3.tradingview.com/tv.js"></script>
-  <script>
-    new TradingView.widget({{
-      container_id:    "{container_id}",
-      symbol:          "{symbol}",
-      interval:        "{interval}",
-      timezone:        "Asia/Kolkata",
-      theme:           "dark",
-      style:           "1",
-      locale:          "en",
-      toolbar_bg:      "#0d1117",
-      backgroundColor: "#060a0f",
-      gridColor:       "#1c2333",
-      width:           "100%",
-      height:          400,
-      hide_top_toolbar: false,
-      hide_legend:     false,
-      save_image:      false,
-      studies: [
-        "RSI@tv-basicstudies",
-        "MAExp@tv-basicstudies",
-        "Volume@tv-basicstudies"
-      ]
-    }});
-  </script>
-</body>
-</html>
-"""
-
-NIFTY_TV_HTML = tv_chart_html("NSE:NIFTY",     "tv_nifty", iv)
-BNF_TV_HTML   = tv_chart_html("NSE:BANKNIFTY", "tv_bnf",   iv)
-
 with chart_col1:
-    st.markdown(
-        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68rem;'
-        'color:#3BA7FF;letter-spacing:2px;margin-bottom:6px;">NIFTY 50</div>',
-        unsafe_allow_html=True,
-    )
-    components.html(NIFTY_TV_HTML, height=430, scrolling=False)
+    df_nifty = fetch_chart_data("^NSEI", cfg["period"], cfg["interval"])
+    if df_nifty is not None:
+        regime_c = REGIME_META.get(
+            ss.market_data.get("NIFTY", {}).get("regime", 1), {}
+        ).get("color", "#3BA7FF")
+        ltp_n = float(df_nifty["Close"].iloc[-1].item())
+        chg_n = ltp_n - float(df_nifty["Close"].iloc[-2].item())
+        pct_n = chg_n / float(df_nifty["Close"].iloc[-2].item()) * 100
+        clr_n = "#33FF99" if chg_n >= 0 else "#FF4D4D"
+        st.markdown(
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75rem;">'
+            f'<span style="color:#e6edf3;font-weight:700;">NIFTY 50</span>'
+            f'  <span style="color:{clr_n};font-size:1rem;font-weight:700;">₹{ltp_n:,.2f}</span>'
+            f'  <span style="color:{clr_n};">{chg_n:+.2f} ({pct_n:+.2f}%)</span>'
+            f'  <span style="color:#6b7785;font-size:0.65rem;"> · {chart_interval} · yfinance</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        fig_nifty = build_chart(df_nifty, f"NIFTY 50 · {chart_interval}", regime_c)
+        st.plotly_chart(fig_nifty, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.warning("NIFTY data unavailable — market may be closed or yfinance rate-limited.")
 
 with chart_col2:
-    st.markdown(
-        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68rem;'
-        'color:#3BA7FF;letter-spacing:2px;margin-bottom:6px;">BANK NIFTY</div>',
-        unsafe_allow_html=True,
-    )
-    components.html(BNF_TV_HTML, height=430, scrolling=False)
+    df_bnf = fetch_chart_data("^NSEBANK", cfg["period"], cfg["interval"])
+    if df_bnf is not None:
+        regime_c2 = REGIME_META.get(
+            ss.market_data.get("BANKNIFTY", {}).get("regime", 1), {}
+        ).get("color", "#3BA7FF")
+        ltp_b = float(df_bnf["Close"].iloc[-1].item())
+        chg_b = ltp_b - float(df_bnf["Close"].iloc[-2].item())
+        pct_b = chg_b / float(df_bnf["Close"].iloc[-2].item()) * 100
+        clr_b = "#33FF99" if chg_b >= 0 else "#FF4D4D"
+        st.markdown(
+            f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75rem;">'
+            f'<span style="color:#e6edf3;font-weight:700;">BANK NIFTY</span>'
+            f'  <span style="color:{clr_b};font-size:1rem;font-weight:700;">₹{ltp_b:,.2f}</span>'
+            f'  <span style="color:{clr_b};">{chg_b:+.2f} ({pct_b:+.2f}%)</span>'
+            f'  <span style="color:#6b7785;font-size:0.65rem;"> · {chart_interval} · yfinance</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        fig_bnf = build_chart(df_bnf, f"BANK NIFTY · {chart_interval}", regime_c2)
+        st.plotly_chart(fig_bnf, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.warning("BANKNIFTY data unavailable — market may be closed or yfinance rate-limited.")
 
 # ── Live Market Matrix ────────────────────────────────────────
 st.markdown('<div class="section-lbl">Live Market Matrix</div>', unsafe_allow_html=True)
@@ -954,7 +1059,7 @@ for i, symbol in enumerate(SYMBOLS):
 # ── Stock Screener ────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Nifty 50 Stock Screener</div>', unsafe_allow_html=True)
 
-scr_tab1, scr_tab2 = st.tabs(["📊 Custom Screener (yfinance)", "🌐 TradingView Screener"])
+scr_tab1, scr_tab2 = st.tabs(["📊 Screener Table", "📈 Market Map (Bubble)"])
 
 with scr_tab1:
     sf1, sf2, sf3, sf4 = st.columns([1, 1, 1, 1])
@@ -1056,25 +1161,60 @@ with scr_tab1:
                     )
 
 with scr_tab2:
-    TV_SCREENER_HTML = """
-    <div class="tradingview-widget-container" style="height:600px;width:100%;">
-      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-screener.js" async>
-      {
-        "width": "100%",
-        "height": 600,
-        "defaultColumn": "overview",
-        "defaultScreen": "most_capitalized",
-        "market": "india",
-        "showToolbar": true,
-        "colorTheme": "dark",
-        "locale": "en",
-        "isTransparent": true
-      }
-      </script>
-    </div>
-    """
-    components.html(TV_SCREENER_HTML, height=620, scrolling=False)
+    bubble_df = fetch_screener_data()
+    if not bubble_df.empty:
+        # Colour by Chg%
+        bubble_colors = [
+            "#33FF99" if v > 1 else
+            "#FFC93B" if v > 0 else
+            "#FF8C00" if v > -1 else
+            "#FF4D4D"
+            for v in bubble_df["Chg %"]
+        ]
+        fig_bubble = go.Figure(go.Scatter(
+            x=bubble_df["RSI(14)"],
+            y=bubble_df["Chg %"],
+            mode="markers+text",
+            text=bubble_df["Stock"],
+            textposition="top center",
+            textfont=dict(family="JetBrains Mono", size=9, color="#8b949e"),
+            marker=dict(
+                size=bubble_df["Vol %"].clip(upper=300) / 8 + 8,
+                color=bubble_colors,
+                opacity=0.85,
+                line=dict(color="#1c2333", width=1),
+            ),
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "RSI: %{x:.1f}<br>"
+                "Chg: %{y:+.2f}%<br>"
+                "Vol%: %{customdata:.0f}%<extra></extra>"
+            ),
+            customdata=bubble_df["Vol %"],
+        ))
+        fig_bubble.add_hline(y=0, line_color="#1c2333", line_width=1)
+        fig_bubble.add_vline(x=50, line_color="#1c2333", line_width=1)
+        fig_bubble.add_vline(x=70, line_color="#FF4D4D44", line_dash="dash", line_width=1)
+        fig_bubble.add_vline(x=30, line_color="#33FF9944", line_dash="dash", line_width=1)
+        fig_bubble.update_layout(
+            paper_bgcolor="#060a0f",
+            plot_bgcolor="#0d1117",
+            font=dict(family="JetBrains Mono", color="#8b949e", size=10),
+            xaxis=dict(title="RSI(14)", gridcolor="#1c2333", zeroline=False),
+            yaxis=dict(title="Day Change %", gridcolor="#1c2333", zeroline=False),
+            height=520,
+            margin=dict(l=10, r=10, t=30, b=40),
+            showlegend=False,
+            title=dict(
+                text="Market Map — Bubble size = Volume %, Colour = Price change",
+                font=dict(size=11, color="#6b7785"),
+                x=0.01,
+            ),
+        )
+        st.plotly_chart(fig_bubble, use_container_width=True, config={"displayModeBar": False})
+        st.caption("X-axis: RSI(14) · Y-axis: Day Change % · Bubble size: Volume vs 20-day avg · Green = up, Red = down")
+    else:
+        st.info("Run the screener first to load bubble data.")
 
 # ── Open Trades ───────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Open Paper Trades</div>', unsafe_allow_html=True)
