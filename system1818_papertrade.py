@@ -981,8 +981,8 @@ with scr_tab1:
 
         styled = (
             filtered.style
-            .applymap(style_chg, subset=["Chg %"])
-            .applymap(style_rsi, subset=["RSI(14)"])
+            .map(style_chg, subset=["Chg %"])
+            .map(style_rsi, subset=["RSI(14)"])
             .set_properties(**{"font-family": "JetBrains Mono, monospace", "font-size": "0.8rem"})
         )
 
