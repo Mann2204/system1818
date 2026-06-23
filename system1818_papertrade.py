@@ -27,6 +27,7 @@ from datetime import datetime, time as dtime
 import math
 import time
 import pytz
+import streamlit.components.v1 as components
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -191,7 +192,7 @@ def get_phase() -> str:
     return "CLOSED"
 
 def can_trade(phase: str) -> bool:
-    return phase in ("ACTIVE", "ACTIVE_PM") and not ss.locked
+    return phase in ("ACTIVE", "MIDDAY_FREEZE", "ACTIVE_PM") and not ss.locked
 
 # ─────────────────────────────────────────────────────────────
 # DATA FETCH — yfinance
@@ -218,6 +219,111 @@ def fetch_vix() -> float:
         return float(df["Close"].iloc[-1].item())
     except Exception:
         return 14.0
+
+# ─────────────────────────────────────────────────────────────
+# SCREENER — NIFTY 50 UNIVERSE
+# ─────────────────────────────────────────────────────────────
+NIFTY50_STOCKS = {
+    "RELIANCE": "RELIANCE.NS", "TCS": "TCS.NS", "HDFCBANK": "HDFCBANK.NS",
+    "INFY": "INFY.NS", "ICICIBANK": "ICICIBANK.NS", "HINDUNILVR": "HINDUNILVR.NS",
+    "SBIN": "SBIN.NS", "BHARTIARTL": "BHARTIARTL.NS", "KOTAKBANK": "KOTAKBANK.NS",
+    "LT": "LT.NS", "HCLTECH": "HCLTECH.NS", "AXISBANK": "AXISBANK.NS",
+    "ASIANPAINT": "ASIANPAINT.NS", "MARUTI": "MARUTI.NS", "SUNPHARMA": "SUNPHARMA.NS",
+    "TITAN": "TITAN.NS", "ULTRACEMCO": "ULTRACEMCO.NS", "WIPRO": "WIPRO.NS",
+    "ONGC": "ONGC.NS", "NTPC": "NTPC.NS", "POWERGRID": "POWERGRID.NS",
+    "M&M": "M&M.NS", "BAJFINANCE": "BAJFINANCE.NS", "NESTLEIND": "NESTLEIND.NS",
+    "JSWSTEEL": "JSWSTEEL.NS", "TATAMOTORS": "TATAMOTORS.NS", "TATASTEEL": "TATASTEEL.NS",
+    "TECHM": "TECHM.NS", "ADANIENT": "ADANIENT.NS", "ADANIPORTS": "ADANIPORTS.NS",
+    "COALINDIA": "COALINDIA.NS", "BAJAJ-AUTO": "BAJAJ-AUTO.NS", "GRASIM": "GRASIM.NS",
+    "HEROMOTOCO": "HEROMOTOCO.NS", "DIVISLAB": "DIVISLAB.NS", "DRREDDY": "DRREDDY.NS",
+    "CIPLA": "CIPLA.NS", "APOLLOHOSP": "APOLLOHOSP.NS", "EICHERMOT": "EICHERMOT.NS",
+    "BPCL": "BPCL.NS", "TATACONSUM": "TATACONSUM.NS", "BRITANNIA": "BRITANNIA.NS",
+    "SBILIFE": "SBILIFE.NS", "HDFCLIFE": "HDFCLIFE.NS", "INDUSINDBK": "INDUSINDBK.NS",
+    "UPL": "UPL.NS", "SHRIRAMFIN": "SHRIRAMFIN.NS", "BAJAJFINSV": "BAJAJFINSV.NS",
+    "HINDALCO": "HINDALCO.NS", "ITC": "ITC.NS",
+}
+
+@st.cache_data(ttl=300)   # refresh every 5 min — screener is heavier
+def fetch_screener_data() -> pd.DataFrame:
+    """
+    Fetches 1-day OHLCV for all Nifty 50 stocks and computes:
+    - Change %  (day return)
+    - Volume ratio vs 20-day avg
+    - RSI(14) on daily closes
+    - Above/below 20-EMA
+    - Simple regime tag (Trending / Ranging / Volatile)
+    """
+    rows = []
+    tickers = list(NIFTY50_STOCKS.values())
+    try:
+        raw = yf.download(
+            tickers, period="30d", interval="1d",
+            progress=False, auto_adjust=True, group_by="ticker",
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    for name, ticker in NIFTY50_STOCKS.items():
+        try:
+            if len(tickers) == 1:
+                df = raw
+            else:
+                df = raw[ticker] if ticker in raw.columns.get_level_values(0) else None
+            if df is None or df.empty or len(df) < 15:
+                continue
+
+            close  = df["Close"].squeeze().dropna()
+            volume = df["Volume"].squeeze().dropna()
+
+            ltp        = float(close.iloc[-1])
+            prev_close = float(close.iloc[-2])
+            chg_pct    = (ltp - prev_close) / prev_close * 100
+
+            vol_ratio  = float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1] * 100)
+
+            # RSI-14
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / (loss + 1e-9)
+            rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
+
+            # EMA position
+            ema20      = close.ewm(span=20, adjust=False).mean()
+            above_ema  = ltp > float(ema20.iloc[-1])
+            ema_gap_pct = (ltp - float(ema20.iloc[-1])) / float(ema20.iloc[-1]) * 100
+
+            # Simple regime tag
+            ema_slope  = (float(ema20.iloc[-1]) - float(ema20.iloc[-3])) / float(ema20.iloc[-3]) * 100
+            if abs(ema_slope) > 0.5 and vol_ratio > 120:
+                regime_tag = "🟩 TRENDING"
+            elif rsi > 70 or rsi < 30:
+                regime_tag = "🟥 EXTREME"
+            elif vol_ratio < 80:
+                regime_tag = "🟦 RANGING"
+            else:
+                regime_tag = "🟨 WATCH"
+
+            rows.append({
+                "Stock":       name,
+                "LTP":         round(ltp, 2),
+                "Chg %":       round(chg_pct, 2),
+                "RSI(14)":     round(rsi, 1),
+                "Vol %":       round(vol_ratio, 0),
+                "EMA Gap %":   round(ema_gap_pct, 2),
+                "Above EMA":   "✅" if above_ema else "❌",
+                "Regime":      regime_tag,
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(rows)
+    df_out.sort_values("Chg %", ascending=False, inplace=True)
+    df_out.reset_index(drop=True, inplace=True)
+    return df_out
 
 # ─────────────────────────────────────────────────────────────
 # TECHNICAL INDICATORS
@@ -696,6 +802,87 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ── TradingView Charts ────────────────────────────────────────
+st.markdown('<div class="section-lbl">TradingView Live Charts</div>', unsafe_allow_html=True)
+
+tv_interval_map = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "1h": "60", "1D": "D"}
+tc1, tc2 = st.columns([3, 1])
+with tc2:
+    tv_interval = st.selectbox(
+        "Interval", list(tv_interval_map.keys()), index=2, label_visibility="collapsed"
+    )
+iv = tv_interval_map[tv_interval]
+
+chart_col1, chart_col2 = st.columns(2)
+
+NIFTY_TV_HTML = f"""
+<div id="tv_nifty" style="border:1px solid #1c2333;border-radius:8px;overflow:hidden;">
+<div class="tradingview-widget-container" style="height:420px;width:100%;">
+  <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+  {{
+    "autosize": true,
+    "symbol": "NSE:NIFTY",
+    "interval": "{iv}",
+    "timezone": "Asia/Kolkata",
+    "theme": "dark",
+    "style": "1",
+    "locale": "en",
+    "backgroundColor": "#060a0f",
+    "gridColor": "#1c2333",
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "save_image": false,
+    "studies": ["RSI@tv-basicstudies", "MAExp@tv-basicstudies", "Volume@tv-basicstudies"],
+    "show_popup_button": false
+  }}
+  </script>
+</div>
+</div>
+"""
+
+BNF_TV_HTML = f"""
+<div id="tv_bnf" style="border:1px solid #1c2333;border-radius:8px;overflow:hidden;">
+<div class="tradingview-widget-container" style="height:420px;width:100%;">
+  <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+  {{
+    "autosize": true,
+    "symbol": "NSE:BANKNIFTY",
+    "interval": "{iv}",
+    "timezone": "Asia/Kolkata",
+    "theme": "dark",
+    "style": "1",
+    "locale": "en",
+    "backgroundColor": "#060a0f",
+    "gridColor": "#1c2333",
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "save_image": false,
+    "studies": ["RSI@tv-basicstudies", "MAExp@tv-basicstudies", "Volume@tv-basicstudies"],
+    "show_popup_button": false
+  }}
+  </script>
+</div>
+</div>
+"""
+
+with chart_col1:
+    st.markdown(
+        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68rem;'
+        'color:#3BA7FF;letter-spacing:2px;margin-bottom:6px;">NIFTY 50</div>',
+        unsafe_allow_html=True,
+    )
+    components.html(NIFTY_TV_HTML, height=430, scrolling=False)
+
+with chart_col2:
+    st.markdown(
+        '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.68rem;'
+        'color:#3BA7FF;letter-spacing:2px;margin-bottom:6px;">BANK NIFTY</div>',
+        unsafe_allow_html=True,
+    )
+    components.html(BNF_TV_HTML, height=430, scrolling=False)
+
 # ── Live Market Matrix ────────────────────────────────────────
 st.markdown('<div class="section-lbl">Live Market Matrix</div>', unsafe_allow_html=True)
 if ss.market_data:
@@ -759,6 +946,131 @@ for i, symbol in enumerate(SYMBOLS):
               <div style="font-size:0.8rem;">⬜ {symbol}</div>
               <div style="font-size:0.72rem;margin-top:6px;">{reason or 'No signal — waiting for regime confirmation.'}</div>
             </div>""", unsafe_allow_html=True)
+
+# ── Stock Screener ────────────────────────────────────────────
+st.markdown('<div class="section-lbl">Nifty 50 Stock Screener</div>', unsafe_allow_html=True)
+
+scr_tab1, scr_tab2 = st.tabs(["📊 Custom Screener (yfinance)", "🌐 TradingView Screener"])
+
+with scr_tab1:
+    sf1, sf2, sf3, sf4 = st.columns([1, 1, 1, 1])
+    with sf1:
+        scr_regime = st.multiselect(
+            "Regime Filter",
+            ["🟩 TRENDING", "🟦 RANGING", "🟥 EXTREME", "🟨 WATCH"],
+            default=["🟩 TRENDING"],
+        )
+    with sf2:
+        scr_ema = st.selectbox("EMA Position", ["All", "Above EMA ✅", "Below EMA ❌"])
+    with sf3:
+        scr_rsi_min, scr_rsi_max = st.slider("RSI Range", 0, 100, (40, 75))
+    with sf4:
+        scr_vol_min = st.slider("Min Volume %", 0, 300, 100)
+
+    if st.button("🔍 Run Screener", key="run_screener"):
+        with st.spinner("Fetching Nifty 50 data… (5–15s)"):
+            fetch_screener_data.clear()
+            scr_df = fetch_screener_data()
+    else:
+        scr_df = fetch_screener_data()
+
+    if scr_df.empty:
+        st.warning("Screener data unavailable — check network or try again.")
+    else:
+        # Apply filters
+        filtered = scr_df.copy()
+        if scr_regime:
+            filtered = filtered[filtered["Regime"].isin(scr_regime)]
+        if scr_ema == "Above EMA ✅":
+            filtered = filtered[filtered["Above EMA"] == "✅"]
+        elif scr_ema == "Below EMA ❌":
+            filtered = filtered[filtered["Above EMA"] == "❌"]
+        filtered = filtered[
+            (filtered["RSI(14)"] >= scr_rsi_min) &
+            (filtered["RSI(14)"] <= scr_rsi_max) &
+            (filtered["Vol %"] >= scr_vol_min)
+        ]
+
+        # Colour-code Chg% column
+        def style_chg(val):
+            color = "#33FF99" if val > 0 else ("#FF4D4D" if val < 0 else "#8b949e")
+            return f"color: {color}; font-weight: 600;"
+
+        def style_rsi(val):
+            if val >= 70: return "color:#FF4D4D;font-weight:600;"
+            if val <= 30: return "color:#33FF99;font-weight:600;"
+            return "color:#e6edf3;"
+
+        styled = (
+            filtered.style
+            .applymap(style_chg, subset=["Chg %"])
+            .applymap(style_rsi, subset=["RSI(14)"])
+            .set_properties(**{"font-family": "JetBrains Mono, monospace", "font-size": "0.8rem"})
+        )
+
+        total_shown = len(filtered)
+        st.caption(
+            f"{total_shown} / {len(scr_df)} stocks match filters  ·  "
+            f"Data cached 5 min · Click '🔍 Run Screener' to force refresh"
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+
+        # Movers summary
+        if not scr_df.empty:
+            top3    = scr_df.nlargest(3, "Chg %")[["Stock", "Chg %", "Regime"]]
+            bottom3 = scr_df.nsmallest(3, "Chg %")[["Stock", "Chg %", "Regime"]]
+            mv1, mv2 = st.columns(2)
+            with mv1:
+                st.markdown(
+                    '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65rem;'
+                    'color:#33FF99;letter-spacing:2px;margin-bottom:4px;">TOP GAINERS</div>',
+                    unsafe_allow_html=True,
+                )
+                for _, row in top3.iterrows():
+                    st.markdown(
+                        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.8rem;'
+                        f'padding:3px 0;color:#e6edf3;">'
+                        f'<span style="color:#33FF99;font-weight:700;">{row["Stock"]}</span>'
+                        f'  <span style="color:#33FF99;">+{row["Chg %"]:.2f}%</span>'
+                        f'  <span style="color:#6b7785;font-size:0.7rem;">{row["Regime"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+            with mv2:
+                st.markdown(
+                    '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.65rem;'
+                    'color:#FF4D4D;letter-spacing:2px;margin-bottom:4px;">TOP LOSERS</div>',
+                    unsafe_allow_html=True,
+                )
+                for _, row in bottom3.iterrows():
+                    st.markdown(
+                        f'<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.8rem;'
+                        f'padding:3px 0;color:#e6edf3;">'
+                        f'<span style="color:#FF4D4D;font-weight:700;">{row["Stock"]}</span>'
+                        f'  <span style="color:#FF4D4D;">{row["Chg %"]:.2f}%</span>'
+                        f'  <span style="color:#6b7785;font-size:0.7rem;">{row["Regime"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+with scr_tab2:
+    TV_SCREENER_HTML = """
+    <div class="tradingview-widget-container" style="height:600px;width:100%;">
+      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-screener.js" async>
+      {
+        "width": "100%",
+        "height": 600,
+        "defaultColumn": "overview",
+        "defaultScreen": "most_capitalized",
+        "market": "india",
+        "showToolbar": true,
+        "colorTheme": "dark",
+        "locale": "en",
+        "isTransparent": true
+      }
+      </script>
+    </div>
+    """
+    components.html(TV_SCREENER_HTML, height=620, scrolling=False)
 
 # ── Open Trades ───────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Open Paper Trades</div>', unsafe_allow_html=True)
@@ -859,7 +1171,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Auto Refresh ──────────────────────────────────────────────
-if auto and phase in ("ACTIVE", "ACTIVE_PM", "OPENING_FREEZE"):
+if auto and phase in ("ACTIVE", "MIDDAY_FREEZE", "ACTIVE_PM", "OPENING_FREEZE"):
     time.sleep(60)
     run_cycle()
     st.rerun()
