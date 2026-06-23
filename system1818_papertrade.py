@@ -815,57 +815,61 @@ iv = tv_interval_map[tv_interval]
 
 chart_col1, chart_col2 = st.columns(2)
 
-NIFTY_TV_HTML = f"""
-<div id="tv_nifty" style="border:1px solid #1c2333;border-radius:8px;overflow:hidden;">
-<div class="tradingview-widget-container" style="height:420px;width:100%;">
-  <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
-  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-  {{
-    "autosize": true,
-    "symbol": "NSE:NIFTY",
-    "interval": "{iv}",
-    "timezone": "Asia/Kolkata",
-    "theme": "dark",
-    "style": "1",
-    "locale": "en",
-    "backgroundColor": "#060a0f",
-    "gridColor": "#1c2333",
-    "hide_top_toolbar": false,
-    "hide_legend": false,
-    "save_image": false,
-    "studies": ["RSI@tv-basicstudies", "MAExp@tv-basicstudies", "Volume@tv-basicstudies"],
-    "show_popup_button": false
-  }}
+def tv_chart_html(symbol: str, container_id: str, interval: str) -> str:
+    """
+    Build a TradingView Advanced Chart using new TradingView.widget() constructor.
+    This avoids passing a JSON blob through a Python f-string, which corrupts
+    booleans (True/False vs true/false) and causes TradingView to fall back to AAPL.
+    All values are JS literals — no JSON serialisation involved.
+    """
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{ margin:0; padding:0; background:#060a0f; }}
+    #tv_label {{
+      font-family:'JetBrains Mono',monospace;
+      font-size:0.68rem; color:#3BA7FF;
+      letter-spacing:2px; padding:6px 10px;
+    }}
+    #{container_id} {{ width:100%; height:400px; }}
+  </style>
+</head>
+<body>
+  <div id="{container_id}"></div>
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <script>
+    new TradingView.widget({{
+      container_id:    "{container_id}",
+      symbol:          "{symbol}",
+      interval:        "{interval}",
+      timezone:        "Asia/Kolkata",
+      theme:           "dark",
+      style:           "1",
+      locale:          "en",
+      toolbar_bg:      "#0d1117",
+      backgroundColor: "#060a0f",
+      gridColor:       "#1c2333",
+      width:           "100%",
+      height:          400,
+      hide_top_toolbar: false,
+      hide_legend:     false,
+      save_image:      false,
+      studies: [
+        "RSI@tv-basicstudies",
+        "MAExp@tv-basicstudies",
+        "Volume@tv-basicstudies"
+      ]
+    }});
   </script>
-</div>
-</div>
+</body>
+</html>
 """
 
-BNF_TV_HTML = f"""
-<div id="tv_bnf" style="border:1px solid #1c2333;border-radius:8px;overflow:hidden;">
-<div class="tradingview-widget-container" style="height:420px;width:100%;">
-  <div class="tradingview-widget-container__widget" style="height:100%;width:100%;"></div>
-  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-  {{
-    "autosize": true,
-    "symbol": "NSE:BANKNIFTY",
-    "interval": "{iv}",
-    "timezone": "Asia/Kolkata",
-    "theme": "dark",
-    "style": "1",
-    "locale": "en",
-    "backgroundColor": "#060a0f",
-    "gridColor": "#1c2333",
-    "hide_top_toolbar": false,
-    "hide_legend": false,
-    "save_image": false,
-    "studies": ["RSI@tv-basicstudies", "MAExp@tv-basicstudies", "Volume@tv-basicstudies"],
-    "show_popup_button": false
-  }}
-  </script>
-</div>
-</div>
-"""
+NIFTY_TV_HTML = tv_chart_html("NSE:NIFTY",     "tv_nifty", iv)
+BNF_TV_HTML   = tv_chart_html("NSE:BANKNIFTY", "tv_bnf",   iv)
 
 with chart_col1:
     st.markdown(
