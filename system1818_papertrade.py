@@ -76,73 +76,100 @@ VIX_TICKER = "^INDIAVIX"
 # ─────────────────────────────────────────────────────────────
 LOT_SIZE = {"NIFTY": 65, "BANKNIFTY": 30}
 
-# NSE F&O monthly expiry schedule (pre-computed for accuracy)
-# Last Thursday of each month — both NIFTY and BANKNIFTY
-# Generated from NSE circular and verified against NSE holiday list
-NSE_MONTHLY_EXPIRIES = {
+# ─────────────────────────────────────────────────────────────
+# LOT SIZES — as confirmed by user
+#   NIFTY     → 65 units/lot
+#   BANKNIFTY → 30 units/lot
+# ─────────────────────────────────────────────────────────────
+LOT_SIZE = {"NIFTY": 65, "BANKNIFTY": 30}
+
+# ─────────────────────────────────────────────────────────────
+# EXPIRY — NSE OFFICIAL SPECIFICATION (NSE/FAOP/68747)
+#
+# NIFTY monthly     → last TUESDAY of the expiry month
+# BANKNIFTY monthly → last TUESDAY of the expiry month
+# If last Tuesday is a trading holiday → previous trading day
+# ─────────────────────────────────────────────────────────────
+
+# NSE declared trading holidays (gazetted + exchange holidays)
+NSE_HOLIDAYS: set[date] = {
     # 2025
-    "2025-01": "30-JAN-25", "2025-02": "27-FEB-25", "2025-03": "27-MAR-25",
-    "2025-04": "24-APR-25", "2025-05": "29-MAY-25", "2025-06": "26-JUN-25",
-    "2025-07": "31-JUL-25", "2025-08": "28-AUG-25", "2025-09": "25-SEP-25",
-    "2025-10": "30-OCT-25", "2025-11": "27-NOV-25", "2025-12": "25-DEC-25",
+    date(2025, 1, 26), date(2025, 2, 26), date(2025, 3, 14),
+    date(2025, 3, 31), date(2025, 4, 14), date(2025, 4, 18),
+    date(2025, 5, 1),  date(2025, 8, 15), date(2025, 8, 27),
+    date(2025, 10, 2), date(2025, 10, 24),date(2025, 11, 5),
+    date(2025, 12, 25),
     # 2026
-    "2026-01": "29-JAN-26", "2026-02": "26-FEB-26", "2026-03": "26-MAR-26",
-    "2026-04": "23-APR-26", "2026-05": "28-MAY-26", "2026-06": "25-JUN-26",
-    "2026-07": "30-JUL-26", "2026-08": "27-AUG-26", "2026-09": "24-SEP-26",
-    "2026-10": "29-OCT-26", "2026-11": "26-NOV-26", "2026-12": "31-DEC-26",
+    date(2026, 1, 26),  # Republic Day
+    date(2026, 3, 20),  # Holi
+    date(2026, 4, 3),   # Good Friday
+    date(2026, 4, 14),  # Dr Ambedkar Jayanti
+    date(2026, 5, 1),   # Maharashtra Day
+    date(2026, 8, 15),  # Independence Day
+    date(2026, 10, 2),  # Gandhi Jayanti
+    date(2026, 10, 22), # Dussehra
+    date(2026, 11, 11), # Diwali Laxmi Pujan
+    date(2026, 11, 14), # Diwali Balipratipada
+    date(2026, 12, 25), # Christmas
+    # 2027
+    date(2027, 1, 26),  # Republic Day
+    date(2027, 3, 10),  # Holi
+    date(2027, 3, 26),  # Good Friday
+    date(2027, 4, 14),  # Dr Ambedkar Jayanti
+    date(2027, 5, 1),   # Maharashtra Day
+    date(2027, 8, 15),  # Independence Day
+    date(2027, 10, 2),  # Gandhi Jayanti
+    date(2027, 12, 25), # Christmas
 }
 
-def _last_thursday_of_month(year: int, month: int) -> date:
-    """Compute last Thursday of any month as a fallback."""
+def _is_trading_day(d: date) -> bool:
+    return d.weekday() < 5 and d not in NSE_HOLIDAYS
+
+def _last_tuesday_of_month(year: int, month: int) -> date:
+    """Last Tuesday (weekday=1) of the given month."""
     if month == 12:
         last_day = date(year + 1, 1, 1) - timedelta(days=1)
     else:
         last_day = date(year, month + 1, 1) - timedelta(days=1)
-    days_back = (last_day.weekday() - 3) % 7
+    days_back = (last_day.weekday() - 1) % 7
     return last_day - timedelta(days=days_back)
+
+def _nse_expiry_for_month(year: int, month: int) -> date:
+    """Last Tuesday of month, rolled back if it falls on a holiday."""
+    d = _last_tuesday_of_month(year, month)
+    while not _is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
 
 @st.cache_data(ttl=3600)
 def get_expiry_cached(symbol: str) -> str:
     """
-    Returns nearest monthly expiry as 'DD-MON-YY'.
-    Looks up pre-computed NSE schedule first, falls back to
-    calendar math for dates beyond the table.
-    Rolls to next month if current expiry has passed.
+    Returns nearest monthly expiry as 'DD-MON-YY' (NSE style).
+    Rolls to next month after 15:30 on expiry day.
     """
     today = datetime.now(IST).date()
     now_t = datetime.now(IST).time()
-
     year, month = today.year, today.month
 
-    for _ in range(3):   # try current + next 2 months
-        key = f"{year}-{month:02d}"
-        exp_str = NSE_MONTHLY_EXPIRIES.get(key)
-        if exp_str:
-            exp_date = datetime.strptime(exp_str, "%d-%b-%y").date()
-        else:
-            # Beyond table — compute dynamically
-            exp_date = _last_thursday_of_month(year, month)
-            exp_str  = exp_date.strftime("%d-%b-%y").upper()
-
-        # Valid if: in future, OR today before 15:30
+    for _ in range(3):
+        exp_date = _nse_expiry_for_month(year, month)
         if exp_date > today:
-            return exp_str
+            return exp_date.strftime("%d-%b-%y").upper()
         if exp_date == today and now_t < dtime(15, 30):
-            return exp_str
-
-        # Roll forward one month
+            return exp_date.strftime("%d-%b-%y").upper()
         if month == 12:
             year, month = year + 1, 1
         else:
             month += 1
 
-    return exp_str  # safety return
+    return exp_date.strftime("%d-%b-%y").upper()
 
 def option_symbol_str(symbol: str, strike: int, direction: str) -> str:
-    """Full NSE contract name e.g.  NIFTY 26-JUN-25 24000 CE"""
+    """Full NSE contract name e.g.  NIFTY 29-JUL-25 24000 CE"""
     expiry   = get_expiry_cached(symbol)
     opt_type = "CE" if direction == "CALL" else "PE"
     return f"{symbol} {expiry} {strike} {opt_type}"
+
 
 # ─────────────────────────────────────────────────────────────
 # PERSISTENCE — saves to a JSON file so reloads don't wipe data
