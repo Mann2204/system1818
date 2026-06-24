@@ -1197,10 +1197,16 @@ for i, symbol in enumerate(SYMBOLS):
 # ══════════════════════════════════════════════════════════════
 st.markdown('<div class="section-lbl">Stock Futures Signals</div>', unsafe_allow_html=True)
 
+# ── Safe locals — guard against AttributeError on first load ──
+_fut_signals       = getattr(ss, "futures_signals",       {})
+_fut_open          = getattr(ss, "futures_open_trades",   [])
+_fut_closed        = getattr(ss, "futures_closed_trades", [])
+_fut_market        = getattr(ss, "futures_market_data",   {})
+
 # ── Signal summary cards ──────────────────────────────────────
 active_fut_signals = {
-    s: sig for s, sig in ss.futures_signals.items()
-    if not any(t["stock"] == s for t in ss.futures_open_trades)
+    s: sig for s, sig in _fut_signals.items()
+    if not any(t["stock"] == s for t in _fut_open)
 }
 
 if active_fut_signals:
@@ -1245,12 +1251,12 @@ else:
         '</div>', unsafe_allow_html=True)
 
 # ── Futures market data table ─────────────────────────────────
-if ss.futures_market_data:
+if _fut_market:
     with st.expander("📊 Stock Futures Market Scan (all 20 stocks)", expanded=False):
         rows = []
-        for stock, md in ss.futures_market_data.items():
+        for stock, md in _fut_market.items():
             # Determine signal status
-            in_open = any(t["stock"] == stock for t in ss.futures_open_trades)
+            in_open = any(t["stock"] == stock for t in _fut_open)
             in_sig  = stock in active_fut_signals
             if in_open:
                 status = "🟢 OPEN"
@@ -1291,9 +1297,9 @@ if ss.futures_market_data:
 
 # ── Open Futures Trades ───────────────────────────────────────
 st.markdown('<div class="section-lbl">Open Stock Futures Trades</div>', unsafe_allow_html=True)
-if ss.futures_open_trades:
+if _fut_open:
     rows = []
-    for t in ss.futures_open_trades:
+    for t in _fut_open:
         qty     = t["lots"] * t["lot_size"]
         mult    = 1 if t["direction"] == "BUY" else -1
         pnl_pct = (t["pnl"] / (t["entry_price"] * qty * 0.15) * 100) if qty else 0
@@ -1348,23 +1354,28 @@ else:
 
 # ── Validation ────────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Validation Dashboard</div>', unsafe_allow_html=True)
-total     = len(ss.closed_trades) + len(ss.futures_closed_trades)
-opt_wins  = sum(1 for t in ss.closed_trades if t["pnl"] > 0)
-fut_wins  = sum(1 for t in ss.futures_closed_trades if t["pnl"] > 0)
+_closed_trades = getattr(ss, "closed_trades", [])
+_validation    = getattr(ss, "validation", {
+    "regime_flips": 0, "sl_hits": 0, "target_hits": 0,
+    "signals_fired": 0, "correct_direction": 0,
+})
+total     = len(_closed_trades) + len(_fut_closed)
+opt_wins  = sum(1 for t in _closed_trades if t["pnl"] > 0)
+fut_wins  = sum(1 for t in _fut_closed if t["pnl"] > 0)
 all_wins  = opt_wins + fut_wins
 v1,v2,v3,v4,v5,v6 = st.columns(6)
-with v1: st.metric("Signals Fired",   ss.validation["signals_fired"])
-with v2: st.metric("SL Hits",         ss.validation["sl_hits"])
-with v3: st.metric("Target Hits",     ss.validation["target_hits"])
-with v4: st.metric("Win Rate (Opt)",  f"{opt_wins/len(ss.closed_trades)*100:.0f}%" if ss.closed_trades else "—")
-with v5: st.metric("Win Rate (Fut)",  f"{fut_wins/len(ss.futures_closed_trades)*100:.0f}%" if ss.futures_closed_trades else "—")
-with v6: st.metric("Regime Flips",    ss.validation["regime_flips"])
+with v1: st.metric("Signals Fired",   _validation["signals_fired"])
+with v2: st.metric("SL Hits",         _validation["sl_hits"])
+with v3: st.metric("Target Hits",     _validation["target_hits"])
+with v4: st.metric("Win Rate (Opt)",  f"{opt_wins/len(_closed_trades)*100:.0f}%" if _closed_trades else "—")
+with v5: st.metric("Win Rate (Fut)",  f"{fut_wins/len(_fut_closed)*100:.0f}%"    if _fut_closed    else "—")
+with v6: st.metric("Regime Flips",    _validation["regime_flips"])
 
 # Closed futures trades table
-if ss.futures_closed_trades:
+if _fut_closed:
     st.markdown('<div class="section-lbl">Closed Stock Futures Trades</div>', unsafe_allow_html=True)
     rows = []
-    for t in ss.futures_closed_trades:
+    for t in _fut_closed:
         qty = t["lots"] * t["lot_size"]
         rows.append({
             "Contract":   t["contract"],
@@ -1381,10 +1392,10 @@ if ss.futures_closed_trades:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # Closed options trades table
-if ss.closed_trades:
+if _closed_trades:
     st.markdown('<div class="section-lbl">Closed Index Options Trades</div>', unsafe_allow_html=True)
     rows = []
-    for t in ss.closed_trades:
+    for t in _closed_trades:
         lot = LOT_SIZE[t["symbol"]]
         qty = t["lots"] * lot
         rows.append({
@@ -1400,9 +1411,10 @@ if ss.closed_trades:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # ── PnL Curve ─────────────────────────────────────────────────
-if len(ss.pnl_curve) >= 2:
+_pnl_curve = getattr(ss, "pnl_curve", [])
+if len(_pnl_curve) >= 2:
     st.markdown('<div class="section-lbl">Paper PnL Curve (Options + Futures)</div>', unsafe_allow_html=True)
-    curve_df = pd.DataFrame(ss.pnl_curve)
+    curve_df = pd.DataFrame(_pnl_curve)
     st.line_chart(curve_df.set_index("ts")["pnl"], use_container_width=True)
 
 # ── Screener ──────────────────────────────────────────────────
@@ -1477,8 +1489,9 @@ with scr_tab2:
 
 # ── Regime History ────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Regime History</div>', unsafe_allow_html=True)
+_regime_history = getattr(ss, "regime_history", {})
 for symbol in SYMBOLS:
-    hist = ss.regime_history.get(symbol, [])
+    hist = _regime_history.get(symbol, [])
     if hist:
         df_hist = pd.DataFrame(hist[-50:])
         st.caption(f"{symbol} — last {len(df_hist)} readings")
@@ -1490,8 +1503,9 @@ for symbol in SYMBOLS:
 
 # ── Activity Log ──────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Activity Log</div>', unsafe_allow_html=True)
-if ss.trade_log:
-    st.code("\n".join(reversed(ss.trade_log[-30:])), language=None)
+_trade_log = getattr(ss, "trade_log", [])
+if _trade_log:
+    st.code("\n".join(reversed(_trade_log[-30:])), language=None)
 else:
     st.markdown('<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.75rem;color:#6b7785;">No activity yet.</div>', unsafe_allow_html=True)
 
