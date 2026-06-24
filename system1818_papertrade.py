@@ -177,20 +177,24 @@ def fmt_pnl(v: float) -> str:
 SAVE_FILE = "system1818_state.json"
 
 def _state_to_dict() -> dict:
+    _s = st.session_state  # always use st.session_state directly — safe before ss alias
     return {
-        "capital":              ss.capital,
-        "core_pnl":             ss.core_pnl,
-        "daily_pnl":            ss.daily_pnl,
-        "locked":               ss.locked,
-        "open_trades":          ss.open_trades,
-        "closed_trades":        ss.closed_trades,
-        "trade_log":            ss.trade_log,
-        "pnl_curve":            ss.pnl_curve,
-        "validation":           ss.validation,
-        "futures_signals":      ss.futures_signals,
-        "futures_open_trades":  ss.futures_open_trades,
-        "futures_closed_trades":ss.futures_closed_trades,
-        "save_date":            datetime.now(IST).strftime("%Y-%m-%d"),
+        "capital":               float(getattr(_s, "capital",               ACCOUNT_BASE)),
+        "core_pnl":              float(getattr(_s, "core_pnl",              0.0)),
+        "daily_pnl":             float(getattr(_s, "daily_pnl",             0.0)),
+        "locked":                bool(getattr(_s,  "locked",                False)),
+        "open_trades":           getattr(_s, "open_trades",                 []),
+        "closed_trades":         getattr(_s, "closed_trades",               []),
+        "trade_log":             getattr(_s, "trade_log",                   []),
+        "pnl_curve":             getattr(_s, "pnl_curve",                   []),
+        "validation":            getattr(_s, "validation", {
+            "regime_flips": 0, "sl_hits": 0, "target_hits": 0,
+            "signals_fired": 0, "correct_direction": 0,
+        }),
+        "futures_signals":       getattr(_s, "futures_signals",             {}),
+        "futures_open_trades":   getattr(_s, "futures_open_trades",         []),
+        "futures_closed_trades": getattr(_s, "futures_closed_trades",       []),
+        "save_date":             datetime.now(IST).strftime("%Y-%m-%d"),
     }
 
 def save_state() -> None:
@@ -206,29 +210,34 @@ def load_state() -> bool:
     try:
         with open(SAVE_FILE, "r") as f:
             data = json.load(f)
+        _s = st.session_state   # use directly — ss alias not set yet when called from init_state
         today = datetime.now(IST).strftime("%Y-%m-%d")
-        ss.capital              = float(data.get("capital",       ACCOUNT_BASE))
-        ss.core_pnl             = float(data.get("core_pnl",      0.0))
-        ss.locked               = bool(data.get("locked",         False))
-        ss.open_trades          = data.get("open_trades",         [])
-        ss.closed_trades        = data.get("closed_trades",       [])
-        ss.trade_log            = data.get("trade_log",           [])
-        ss.pnl_curve            = data.get("pnl_curve",           [])
-        ss.validation           = data.get("validation", {
+        _s.capital              = float(data.get("capital",       ACCOUNT_BASE))
+        _s.core_pnl             = float(data.get("core_pnl",      0.0))
+        _s.locked               = bool(data.get("locked",         False))
+        _s.open_trades          = data.get("open_trades",         [])
+        _s.closed_trades        = data.get("closed_trades",       [])
+        _s.trade_log            = data.get("trade_log",           [])
+        _s.pnl_curve            = data.get("pnl_curve",           [])
+        _s.validation           = data.get("validation", {
             "regime_flips": 0, "sl_hits": 0, "target_hits": 0,
             "signals_fired": 0, "correct_direction": 0,
         })
-        ss.futures_signals       = data.get("futures_signals",      {})
-        ss.futures_open_trades   = data.get("futures_open_trades",  [])
-        ss.futures_closed_trades = data.get("futures_closed_trades",[])
+        # Futures state — always default to empty if missing (e.g. old save files)
+        _s.futures_signals       = data.get("futures_signals",      {})
+        _s.futures_open_trades   = data.get("futures_open_trades",  [])
+        _s.futures_closed_trades = data.get("futures_closed_trades",[])
+        # futures_market_data is never persisted — always starts empty each session
+        if not hasattr(_s, "futures_market_data"):
+            _s.futures_market_data = {}
 
         if data.get("save_date") != today:
-            ss.daily_pnl = 0.0
-            ss.locked    = False
+            _s.daily_pnl = 0.0
+            _s.locked    = False
             ts = datetime.now(IST).strftime("%H:%M:%S")
-            ss.trade_log.append(f"[{ts}] New trading day — daily PnL reset.")
+            _s.trade_log.append(f"[{ts}] New trading day — daily PnL reset.")
         else:
-            ss.daily_pnl = float(data.get("daily_pnl", 0.0))
+            _s.daily_pnl = float(data.get("daily_pnl", 0.0))
         return True
     except Exception:
         return False
@@ -1057,8 +1066,8 @@ with ctrl3:
         st.rerun()
 with ctrl4:
     if ss.last_fetch:
-        idx_open = len(ss.open_trades)
-        fut_open = len(ss.futures_open_trades)
+        idx_open = len(getattr(ss, "open_trades",         []))
+        fut_open = len(getattr(ss, "futures_open_trades", []))
         st.markdown(
             f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.72rem;color:#6b7785;">'
             f'Last fetch: {ss.last_fetch} · Options: {idx_open} open · Futures: {fut_open} open</span>',
@@ -1071,13 +1080,16 @@ if not ss.market_data:
 # ── Account ───────────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Paper Account</div>', unsafe_allow_html=True)
 
-opt_deployed  = sum(t["entry_prem"] * t["lots"] * LOT_SIZE[t["symbol"]] for t in ss.open_trades)
+_open_trades     = getattr(ss, "open_trades",         [])
+_fut_open_trades = getattr(ss, "futures_open_trades", [])
+
+opt_deployed  = sum(t["entry_prem"] * t["lots"] * LOT_SIZE[t["symbol"]] for t in _open_trades)
 fut_deployed  = sum(t["entry_price"] * t["lots"] * t["lot_size"] * 0.15
-                    for t in ss.futures_open_trades)   # ~15% margin approx
+                    for t in _fut_open_trades)   # ~15% margin approx
 capital_deployed = opt_deployed + fut_deployed
 capital_free     = ss.capital - capital_deployed
-unrealised_pnl   = sum(t["pnl"] for t in ss.open_trades) + \
-                   sum(t["pnl"] for t in ss.futures_open_trades)
+unrealised_pnl   = sum(t["pnl"] for t in _open_trades) + \
+                   sum(t["pnl"] for t in _fut_open_trades)
 
 a1, a2, a3, a4, a5, a6 = st.columns(6)
 with a1: st.metric("Starting Capital",   f"₹{ACCOUNT_BASE:,.0f}")
