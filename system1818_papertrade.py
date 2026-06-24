@@ -170,6 +170,20 @@ def option_symbol_str(symbol: str, strike: int, direction: str) -> str:
     opt_type = "CE" if direction == "CALL" else "PE"
     return f"{symbol} {expiry} {strike} {opt_type}"
 
+# ─────────────────────────────────────────────────────────────
+# HELPERS — defined early so load_state / init_state can use them
+# ─────────────────────────────────────────────────────────────
+def log_event(msg: str) -> None:
+    _ss = st.session_state
+    ts = datetime.now(IST).strftime("%H:%M:%S")
+    if not hasattr(_ss, "trade_log"):
+        _ss.trade_log = []
+    _ss.trade_log.append(f"[{ts}] {msg}")
+    _ss.trade_log = _ss.trade_log[-100:]
+
+def fmt_pnl(v: float) -> str:
+    return f"+₹{abs(v):,.0f}" if v >= 0 else f"-₹{abs(v):,.0f}"
+
 
 # ─────────────────────────────────────────────────────────────
 # PERSISTENCE — saves to a JSON file so reloads don't wipe data
@@ -227,8 +241,9 @@ def load_state() -> bool:
         # Reset daily PnL at the start of a new trading day
         if data.get("save_date") != today:
             ss.daily_pnl = 0.0
-            ss.locked    = False   # unlock circuit breaker for new day
-            log_event("New trading day — daily PnL reset.")
+            ss.locked    = False
+            ts = datetime.now(IST).strftime("%H:%M:%S")
+            ss.trade_log.append(f"[{ts}] New trading day — daily PnL reset.")
         else:
             ss.daily_pnl = float(data.get("daily_pnl", 0.0))
 
@@ -354,7 +369,8 @@ def init_state():
     # ── Load persisted data from disk (survives reloads/reboots) ──
     loaded = load_state()
     if not loaded:
-        log_event("No saved state found — starting fresh.")
+        ts = datetime.now(IST).strftime("%H:%M:%S")
+        ss.trade_log.append(f"[{ts}] No saved state found — starting fresh.")
 
 init_state()
 ss = st.session_state
@@ -884,20 +900,6 @@ def update_open_trades(symbol: str, current_spot: float) -> None:
     for trade, exit_p, reason in to_close:
         ss.open_trades.remove(trade)
         paper_exit(trade, exit_p, reason)   # paper_exit handles validation counters
-
-# ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
-def log_event(msg: str) -> None:
-    _ss = st.session_state
-    ts = datetime.now(IST).strftime("%H:%M:%S")
-    if not hasattr(_ss, "trade_log"):
-        _ss.trade_log = []
-    _ss.trade_log.append(f"[{ts}] {msg}")
-    _ss.trade_log = _ss.trade_log[-100:]
-
-def fmt_pnl(v: float) -> str:
-    return f"+₹{abs(v):,.0f}" if v >= 0 else f"-₹{abs(v):,.0f}"
 
 # ─────────────────────────────────────────────────────────────
 # MAIN FETCH + PROCESS CYCLE
