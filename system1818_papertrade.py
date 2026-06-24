@@ -862,9 +862,12 @@ def update_open_trades(symbol: str, current_spot: float) -> None:
 # HELPERS
 # ─────────────────────────────────────────────────────────────
 def log_event(msg: str) -> None:
+    _ss = st.session_state
     ts = datetime.now(IST).strftime("%H:%M:%S")
-    ss.trade_log.append(f"[{ts}] {msg}")
-    ss.trade_log = ss.trade_log[-100:]
+    if not hasattr(_ss, "trade_log"):
+        _ss.trade_log = []
+    _ss.trade_log.append(f"[{ts}] {msg}")
+    _ss.trade_log = _ss.trade_log[-100:]
 
 def fmt_pnl(v: float) -> str:
     return f"+₹{abs(v):,.0f}" if v >= 0 else f"-₹{abs(v):,.0f}"
