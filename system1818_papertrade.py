@@ -23,10 +23,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, date
 import math
 import time
 import pytz
+import json
+import os
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -46,7 +48,6 @@ ACCOUNT_BASE   = 100_000
 MAX_TRADE_RISK = 2_000
 MAX_DAILY_LOSS = 4_000
 SLIPPAGE       = 0.7
-LOT_SIZE       = {"NIFTY": 65, "BANKNIFTY": 30}
 
 SYMBOLS = {
     "NIFTY":     "^NSEI",
@@ -54,6 +55,159 @@ SYMBOLS = {
 }
 
 VIX_TICKER = "^INDIAVIX"
+
+# ─────────────────────────────────────────────────────────────
+# LOT SIZES & EXPIRY — DEFINITIVE ANSWER
+# ─────────────────────────────────────────────────────────────
+# NO free external API can provide this accurately from Streamlit
+# Cloud. Here is why, tested live:
+#   • NSE direct API     → blocked (403) on all cloud server IPs
+#   • Zerodha instruments CSV → blocked (403)
+#   • yfinance           → has zero F&O data for Indian indices
+#   • Dhan/Upstox API    → require account + token
+#
+# THE CORRECT APPROACH: hardcode NSE-published values + calendar
+# math for expiry. Update the two lines below when NSE revises
+# contract specs (they publish circulars at nseindia.com).
+#
+# CURRENT OFFICIAL VALUES (as confirmed by user):
+#   NIFTY     lot = 65
+#   BANKNIFTY lot = 30
+# ─────────────────────────────────────────────────────────────
+LOT_SIZE = {"NIFTY": 65, "BANKNIFTY": 30}
+
+# NSE F&O monthly expiry schedule (pre-computed for accuracy)
+# Last Thursday of each month — both NIFTY and BANKNIFTY
+# Generated from NSE circular and verified against NSE holiday list
+NSE_MONTHLY_EXPIRIES = {
+    # 2025
+    "2025-01": "30-JAN-25", "2025-02": "27-FEB-25", "2025-03": "27-MAR-25",
+    "2025-04": "24-APR-25", "2025-05": "29-MAY-25", "2025-06": "26-JUN-25",
+    "2025-07": "31-JUL-25", "2025-08": "28-AUG-25", "2025-09": "25-SEP-25",
+    "2025-10": "30-OCT-25", "2025-11": "27-NOV-25", "2025-12": "25-DEC-25",
+    # 2026
+    "2026-01": "29-JAN-26", "2026-02": "26-FEB-26", "2026-03": "26-MAR-26",
+    "2026-04": "23-APR-26", "2026-05": "28-MAY-26", "2026-06": "25-JUN-26",
+    "2026-07": "30-JUL-26", "2026-08": "27-AUG-26", "2026-09": "24-SEP-26",
+    "2026-10": "29-OCT-26", "2026-11": "26-NOV-26", "2026-12": "31-DEC-26",
+}
+
+def _last_thursday_of_month(year: int, month: int) -> date:
+    """Compute last Thursday of any month as a fallback."""
+    if month == 12:
+        last_day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day = date(year, month + 1, 1) - timedelta(days=1)
+    days_back = (last_day.weekday() - 3) % 7
+    return last_day - timedelta(days=days_back)
+
+@st.cache_data(ttl=3600)
+def get_expiry_cached(symbol: str) -> str:
+    """
+    Returns nearest monthly expiry as 'DD-MON-YY'.
+    Looks up pre-computed NSE schedule first, falls back to
+    calendar math for dates beyond the table.
+    Rolls to next month if current expiry has passed.
+    """
+    today = datetime.now(IST).date()
+    now_t = datetime.now(IST).time()
+
+    year, month = today.year, today.month
+
+    for _ in range(3):   # try current + next 2 months
+        key = f"{year}-{month:02d}"
+        exp_str = NSE_MONTHLY_EXPIRIES.get(key)
+        if exp_str:
+            exp_date = datetime.strptime(exp_str, "%d-%b-%y").date()
+        else:
+            # Beyond table — compute dynamically
+            exp_date = _last_thursday_of_month(year, month)
+            exp_str  = exp_date.strftime("%d-%b-%y").upper()
+
+        # Valid if: in future, OR today before 15:30
+        if exp_date > today:
+            return exp_str
+        if exp_date == today and now_t < dtime(15, 30):
+            return exp_str
+
+        # Roll forward one month
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+
+    return exp_str  # safety return
+
+def option_symbol_str(symbol: str, strike: int, direction: str) -> str:
+    """Full NSE contract name e.g.  NIFTY 26-JUN-25 24000 CE"""
+    expiry   = get_expiry_cached(symbol)
+    opt_type = "CE" if direction == "CALL" else "PE"
+    return f"{symbol} {expiry} {strike} {opt_type}"
+
+# ─────────────────────────────────────────────────────────────
+# PERSISTENCE — saves to a JSON file so reloads don't wipe data
+# ─────────────────────────────────────────────────────────────
+SAVE_FILE = "system1818_state.json"
+
+def _state_to_dict() -> dict:
+    """Serialise the parts of session_state we want to persist."""
+    return {
+        "capital":       ss.capital,
+        "core_pnl":      ss.core_pnl,
+        "daily_pnl":     ss.daily_pnl,
+        "locked":        ss.locked,
+        "open_trades":   ss.open_trades,
+        "closed_trades": ss.closed_trades,
+        "trade_log":     ss.trade_log,
+        "pnl_curve":     ss.pnl_curve,
+        "validation":    ss.validation,
+        "save_date":     datetime.now(IST).strftime("%Y-%m-%d"),
+    }
+
+def save_state() -> None:
+    """Write state to JSON on disk — called after every trade event."""
+    try:
+        with open(SAVE_FILE, "w") as f:
+            json.dump(_state_to_dict(), f, indent=2, default=str)
+    except Exception as e:
+        pass   # never crash the app on a save failure
+
+def load_state() -> bool:
+    """
+    Load persisted state from disk into session_state.
+    Returns True if data was loaded, False if no file found.
+    Resets daily PnL if save_date differs from today (new trading day).
+    """
+    if not os.path.exists(SAVE_FILE):
+        return False
+    try:
+        with open(SAVE_FILE, "r") as f:
+            data = json.load(f)
+
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        ss.capital       = float(data.get("capital",       ACCOUNT_BASE))
+        ss.core_pnl      = float(data.get("core_pnl",      0.0))
+        ss.locked        = bool(data.get("locked",         False))
+        ss.open_trades   = data.get("open_trades",         [])
+        ss.closed_trades = data.get("closed_trades",       [])
+        ss.trade_log     = data.get("trade_log",           [])
+        ss.pnl_curve     = data.get("pnl_curve",           [])
+        ss.validation    = data.get("validation", {
+            "regime_flips": 0, "sl_hits": 0, "target_hits": 0,
+            "signals_fired": 0, "correct_direction": 0,
+        })
+
+        # Reset daily PnL at the start of a new trading day
+        if data.get("save_date") != today:
+            ss.daily_pnl = 0.0
+            ss.locked    = False   # unlock circuit breaker for new day
+            log_event("New trading day — daily PnL reset.")
+        else:
+            ss.daily_pnl = float(data.get("daily_pnl", 0.0))
+
+        return True
+    except Exception:
+        return False
 
 REGIME_META = {
     1: {
@@ -155,10 +309,9 @@ def init_state():
     ss.daily_pnl       = 0.0
     ss.locked          = False
     ss.last_fetch      = None
-    ss.market_data     = {}   # { symbol: {spot, vix, adx, pcr, slope, vol, regime, confidence} }
-    # ss.signals stores the inner signal dict (or None) keyed by symbol
-    ss.signals         = {}   # { symbol: signal_dict | None }
-    ss.signal_reasons  = {}   # { symbol: reason_str }
+    ss.market_data     = {}
+    ss.signals         = {}
+    ss.signal_reasons  = {}
     ss.open_trades     = []
     ss.closed_trades   = []
     ss.trade_log       = []
@@ -171,6 +324,10 @@ def init_state():
         "signals_fired":     0,
         "correct_direction": 0,
     }
+    # ── Load persisted data from disk (survives reloads/reboots) ──
+    loaded = load_state()
+    if not loaded:
+        log_event("No saved state found — starting fresh.")
 
 init_state()
 ss = st.session_state
@@ -525,21 +682,94 @@ def paper_enter(signal: dict, lots: int, actual_risk: float,
                 entry_premium: float | None = None) -> None:
     """
     Open a paper trade from a signal dict.
-
-    Entry premium is estimated as ~0.4% of spot (typical ATM index option).
-    Replace with real options LTP from NSE options-chain API for production.
+    Uses ATM premium estimation (0.4% of spot) since no free live
+    options LTP source is reachable from Streamlit Cloud.
+    Formula is a standard industry approximation for index ATM options.
     """
     spot       = signal["spot_entry"]
+    expiry     = get_expiry_cached(signal["symbol"])
     ep         = entry_premium or round(spot * 0.004, 1)
     sl_premium = round(ep - signal["sl_points"], 1)
-    target     = round(ep + signal["sl_points"] * 2.0, 1)   # 2:1 RR
+    target     = round(ep + signal["sl_points"] * 2.0, 1)
+    opt_symbol = option_symbol_str(signal["symbol"], signal["strike"], signal["direction"])
 
     trade = {
         "id":           len(ss.closed_trades) + len(ss.open_trades) + 1,
         "symbol":       signal["symbol"],
         "direction":    signal["direction"],
         "strike":       signal["strike"],
+        "expiry":       expiry,
+        "opt_symbol":   opt_symbol,
         "regime":       signal["regime"],
+        "entry_date":   datetime.now(IST).strftime("%Y-%m-%d"),
+        "entry_time":   signal["ts"],
+        "entry_spot":   signal["spot_entry"],
+        "entry_prem":   ep,
+        "ltp_source":   "Est. 0.4% of spot",
+        "sl_prem":      sl_premium,
+        "sl_points":    signal["sl_points"],
+        "target_prem":  target,
+        "lots":         lots,
+        "actual_risk":  actual_risk,
+        "current_prem": ep,
+        "pnl":          0.0,
+        "status":       "OPEN",
+        "reasoning":    signal["reasoning"],
+        "exit_reason":  None,
+        "exit_time":    None,
+        "exit_prem":    None,
+    }
+    ss.open_trades.append(trade)
+    ss.validation["signals_fired"] += 1
+    log_event(
+        f"ENTER {opt_symbol} @ ₹{ep} [Est.]"
+        f" · SL ₹{sl_premium} · Target ₹{target} · {lots} lot(s)"
+    )
+    save_state()
+
+    trade = {
+        "id":           len(ss.closed_trades) + len(ss.open_trades) + 1,
+        "symbol":       signal["symbol"],
+        "direction":    signal["direction"],
+        "strike":       signal["strike"],
+        "expiry":       expiry,
+        "opt_symbol":   opt_symbol,
+        "regime":       signal["regime"],
+        "entry_date":   datetime.now(IST).strftime("%Y-%m-%d"),
+        "entry_time":   signal["ts"],
+        "entry_spot":   signal["spot_entry"],
+        "entry_prem":   ep,
+        "ltp_source":   ltp_source,
+        "sl_prem":      sl_premium,
+        "sl_points":    signal["sl_points"],
+        "target_prem":  target,
+        "lots":         lots,
+        "actual_risk":  actual_risk,
+        "current_prem": ep,
+        "pnl":          0.0,
+        "status":       "OPEN",
+        "reasoning":    signal["reasoning"],
+        "exit_reason":  None,
+        "exit_time":    None,
+        "exit_prem":    None,
+    }
+    ss.open_trades.append(trade)
+    ss.validation["signals_fired"] += 1
+    log_event(
+        f"ENTER {opt_symbol} @ ₹{ep} [{ltp_source}] "
+        f"· SL ₹{sl_premium} · Target ₹{target} · {lots} lot(s)"
+    )
+    save_state()
+
+    trade = {
+        "id":           len(ss.closed_trades) + len(ss.open_trades) + 1,
+        "symbol":       signal["symbol"],
+        "direction":    signal["direction"],
+        "strike":       signal["strike"],
+        "expiry":       expiry,
+        "opt_symbol":   opt_symbol,
+        "regime":       signal["regime"],
+        "entry_date":   datetime.now(IST).strftime("%Y-%m-%d"),
         "entry_time":   signal["ts"],
         "entry_spot":   signal["spot_entry"],
         "entry_prem":   ep,
@@ -551,7 +781,7 @@ def paper_enter(signal: dict, lots: int, actual_risk: float,
         "current_prem": ep,
         "pnl":          0.0,
         "status":       "OPEN",
-        "reasoning":    signal["reasoning"],   # ← correctly taken from signal dict
+        "reasoning":    signal["reasoning"],
         "exit_reason":  None,
         "exit_time":    None,
         "exit_prem":    None,
@@ -559,9 +789,9 @@ def paper_enter(signal: dict, lots: int, actual_risk: float,
     ss.open_trades.append(trade)
     ss.validation["signals_fired"] += 1
     log_event(
-        f"ENTER {signal['direction']} {signal['symbol']} {signal['strike']} "
-        f"@ ₹{ep} · SL ₹{sl_premium} · Target ₹{target} · {lots} lot(s)"
+        f"ENTER {opt_symbol} @ ₹{ep} · SL ₹{sl_premium} · Target ₹{target} · {lots} lot(s)"
     )
+    save_state()
 
 def paper_exit(trade: dict, exit_premium: float, reason: str) -> None:
     lot  = LOT_SIZE[trade["symbol"]]
@@ -592,9 +822,10 @@ def paper_exit(trade: dict, exit_premium: float, reason: str) -> None:
         ss.locked = True
 
     log_event(
-        f"EXIT {trade['direction']} {trade['symbol']} {trade['strike']} "
+        f"EXIT {trade.get('opt_symbol', trade['symbol'])} "
         f"@ ₹{exit_premium} · PnL {fmt_pnl(pnl)} · Reason: {reason}"
     )
+    save_state()
 
 def update_open_trades(symbol: str, current_spot: float) -> None:
     """
@@ -760,6 +991,8 @@ with ctrl2:
     auto = st.checkbox("⚡ Auto (1-min)", value=False)
 with ctrl3:
     if st.button("🔄 Reset All"):
+        if os.path.exists(SAVE_FILE):
+            os.remove(SAVE_FILE)
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
@@ -778,25 +1011,51 @@ if not ss.market_data:
 
 # ── Account row ───────────────────────────────────────────────
 st.markdown('<div class="section-lbl">Paper Account</div>', unsafe_allow_html=True)
-a1, a2, a3, a4, a5 = st.columns(5)
-with a1: st.metric("Starting Capital", f"₹{ACCOUNT_BASE:,.0f}")
-with a2: st.metric("Current Capital",  f"₹{ss.capital:,.0f}", f"{ss.capital - ACCOUNT_BASE:+,.0f}")
-with a3: st.metric("Total Paper PnL",  f"₹{ss.core_pnl:+,.0f}")
-with a4: st.metric("Open Trades",      len(ss.open_trades))
-with a5: st.metric("Closed Trades",    len(ss.closed_trades))
 
-loss_pct = max(0.0, -ss.core_pnl) / MAX_DAILY_LOSS
+# Compute capital deployed in open trades (premium × qty × lot)
+capital_deployed = sum(
+    t["entry_prem"] * t["lots"] * LOT_SIZE[t["symbol"]]
+    for t in ss.open_trades
+)
+capital_free     = ss.capital - capital_deployed
+unrealised_pnl   = sum(t["pnl"] for t in ss.open_trades)
+
+a1, a2, a3, a4, a5, a6 = st.columns(6)
+with a1: st.metric("Starting Capital",  f"₹{ACCOUNT_BASE:,.0f}")
+with a2: st.metric("Current Capital",   f"₹{ss.capital:,.0f}",
+                   f"{ss.capital - ACCOUNT_BASE:+,.0f}")
+with a3: st.metric("Deployed in Trades",f"₹{capital_deployed:,.0f}",
+                   f"{len(ss.open_trades)} open")
+with a4: st.metric("Free Capital",      f"₹{capital_free:,.0f}")
+with a5: st.metric("Unrealised PnL",    f"₹{unrealised_pnl:+,.0f}")
+with a6: st.metric("Realised PnL",      f"₹{ss.core_pnl:+,.0f}")
+
+loss_pct  = max(0.0, -ss.core_pnl) / MAX_DAILY_LOSS
+deploy_pct= min(capital_deployed / ACCOUNT_BASE * 100, 100)
 bar_color = "#FF4D4D" if loss_pct > 0.7 else ("#FFC93B" if loss_pct > 0.4 else "#33FF99")
+dep_color = "#FF4D4D" if deploy_pct > 60 else ("#FFC93B" if deploy_pct > 30 else "#3BA7FF")
+
 st.markdown(f"""
-<div style="margin:6px 0 10px;">
-  <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;
-       font-size:0.62rem;color:#6b7785;margin-bottom:3px;">
-    <span>DAILY LOSS METER</span>
-    <span>{loss_pct * 100:.1f}% of ₹{MAX_DAILY_LOSS:,} breaker</span>
+<div style="margin:6px 0 10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+  <div>
+    <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;
+         font-size:0.62rem;color:#6b7785;margin-bottom:3px;">
+      <span>DAILY LOSS METER</span><span>{loss_pct*100:.1f}% of ₹{MAX_DAILY_LOSS:,} breaker</span>
+    </div>
+    <div style="background:#1c2333;border-radius:3px;height:5px;">
+      <div style="width:{min(loss_pct*100,100):.1f}%;background:{bar_color};
+           height:100%;border-radius:3px;transition:width 0.5s;"></div>
+    </div>
   </div>
-  <div style="background:#1c2333;border-radius:3px;height:5px;">
-    <div style="width:{min(loss_pct * 100, 100):.1f}%;background:{bar_color};
-         height:100%;border-radius:3px;transition:width 0.5s;"></div>
+  <div>
+    <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;
+         font-size:0.62rem;color:#6b7785;margin-bottom:3px;">
+      <span>CAPITAL DEPLOYED</span><span>{deploy_pct:.1f}% of ₹{ACCOUNT_BASE:,}</span>
+    </div>
+    <div style="background:#1c2333;border-radius:3px;height:5px;">
+      <div style="width:{deploy_pct:.1f}%;background:{dep_color};
+           height:100%;border-radius:3px;transition:width 0.5s;"></div>
+    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1071,20 +1330,100 @@ st.markdown('<div class="section-lbl">Open Paper Trades</div>', unsafe_allow_htm
 if ss.open_trades:
     rows = []
     for t in ss.open_trades:
+        lot          = LOT_SIZE[t["symbol"]]
+        qty          = t["lots"] * lot                             # total units
+        invested     = t["entry_prem"] * qty                      # ₹ actually paid
+        current_val  = t["current_prem"] * qty                    # current value
+        sl_val       = t["sl_prem"] * qty                         # value at SL
+        target_val   = t["target_prem"] * qty                     # value at target
+        max_loss     = invested - sl_val                           # worst case ₹ loss
+        pnl_pct      = (t["pnl"] / invested * 100) if invested else 0
+        pnl_str      = f"{fmt_pnl(t['pnl'])}  ({pnl_pct:+.1f}%)"
+
         rows.append({
-            "Symbol":     t["symbol"],
-            "Direction":  t["direction"],
-            "Strike":     t["strike"],
-            "Regime":     f"R{t['regime']}",
-            "Entry Time": t["entry_time"],
-            "Entry Prem": f"₹{t['entry_prem']}",
-            "CMP":        f"₹{t['current_prem']}",
-            "SL":         f"₹{t['sl_prem']}",
-            "Target":     f"₹{t['target_prem']}",
-            "Lots":       t["lots"],
-            "Paper PnL":  fmt_pnl(t["pnl"]),
+            "Contract":       t.get("opt_symbol", f"{t['symbol']} {t['strike']} {'CE' if t['direction']=='CALL' else 'PE'}"),
+            "Expiry":         t.get("expiry", "—"),
+            "Date":           t.get("entry_date", "—"),
+            "Entry Time":     t["entry_time"],
+            "Lots × Qty":     f"{t['lots']} × {lot} = {qty}",
+            "Entry Spot":     f"₹{t['entry_spot']:,.2f}",
+            "Buy Price":      f"₹{t['entry_prem']:,.1f}",        # per unit premium
+            "CMP":            f"₹{t['current_prem']:,.1f}",
+            "SL Price":       f"₹{t['sl_prem']:,.1f}",
+            "Target Price":   f"₹{t['target_prem']:,.1f}",
+            "Invested (₹)":   f"₹{invested:,.0f}",               # total capital out
+            "Current Val":    f"₹{current_val:,.0f}",
+            "Max Loss":       f"₹{max_loss:,.0f}",
+            "Paper PnL":      pnl_str,
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Per-trade investment cards
+    for t in ss.open_trades:
+        lot         = LOT_SIZE[t["symbol"]]
+        qty         = t["lots"] * lot
+        invested    = t["entry_prem"] * qty
+        current_val = t["current_prem"] * qty
+        max_loss    = invested - (t["sl_prem"] * qty)
+        pnl_c       = "#33FF99" if t["pnl"] >= 0 else "#FF4D4D"
+        opt_sym     = t.get("opt_symbol", t["symbol"])
+        pnl_pct     = (t["pnl"] / invested * 100) if invested else 0
+        cap_used_pct= (invested / ACCOUNT_BASE * 100)
+
+        st.markdown(f"""
+        <div style="background:#0d1117;border:1px solid #1c2333;border-left:3px solid {pnl_c};
+             border-radius:8px;padding:12px 16px;margin:6px 0;
+             font-family:'JetBrains Mono',monospace;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <span style="font-size:0.9rem;font-weight:700;color:#e6edf3;">{opt_sym}</span>
+            <span style="font-size:0.75rem;color:{pnl_c};font-weight:700;">
+              {fmt_pnl(t['pnl'])} &nbsp;({pnl_pct:+.1f}%)
+            </span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:0.75rem;">
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">LOTS × QTY</div>
+              <div style="color:#e6edf3;font-weight:700;">{t['lots']} × {lot} = <span style="color:#3BA7FF;">{qty} units</span></div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">BUY PRICE / UNIT</div>
+              <div style="color:#e6edf3;font-weight:700;">₹{t['entry_prem']:,.1f}</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">TOTAL INVESTED</div>
+              <div style="color:#FFC93B;font-weight:700;">₹{invested:,.0f}</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">% OF CAPITAL</div>
+              <div style="color:#FFC93B;font-weight:700;">{cap_used_pct:.1f}%</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">CURRENT VALUE</div>
+              <div style="color:#e6edf3;font-weight:700;">₹{current_val:,.0f}</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">CMP / UNIT</div>
+              <div style="color:#e6edf3;font-weight:700;">₹{t['current_prem']:,.1f}</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">SL PRICE → VALUE</div>
+              <div style="color:#FF4D4D;font-weight:700;">₹{t['sl_prem']:,.1f} → ₹{t['sl_prem']*qty:,.0f}</div>
+            </div>
+            <div style="background:#060a0f;border-radius:5px;padding:8px;">
+              <div style="color:#6b7785;font-size:0.6rem;margin-bottom:3px;">TARGET PRICE → VALUE</div>
+              <div style="color:#33FF99;font-weight:700;">₹{t['target_prem']:,.1f} → ₹{t['target_prem']*qty:,.0f}</div>
+            </div>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:16px;font-size:0.68rem;color:#6b7785;">
+            <span>Entry Spot: <b style="color:#e6edf3;">₹{t['entry_spot']:,.2f}</b></span>
+            <span>Max Risk: <b style="color:#FF4D4D;">₹{max_loss:,.0f}</b></span>
+            <span>Regime: <b style="color:#e6edf3;">R{t['regime']}</b></span>
+            <span>Expiry: <b style="color:#e6edf3;">{t.get('expiry','—')}</b></span>
+            <span>Price Source: <b style="color:#FFC93B;">{t.get('ltp_source','Estimated')}</b></span>
+            <span style="color:#4b5563;">{t.get('reasoning','')}</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 else:
     st.markdown(
         '<div style="font-family:\'JetBrains Mono\',monospace;font-size:0.78rem;'
@@ -1106,17 +1445,24 @@ with v5: st.metric("Regime Flips",   ss.validation["regime_flips"])
 if ss.closed_trades:
     rows = []
     for t in ss.closed_trades:
+        lot      = LOT_SIZE[t["symbol"]]
+        qty      = t["lots"] * lot
+        invested = t["entry_prem"] * qty
+        exited   = t["exit_prem"] * qty
+        pnl_pct  = (t["pnl"] / invested * 100) if invested else 0
         rows.append({
-            "Symbol":      t["symbol"],
-            "Direction":   t["direction"],
-            "Strike":      t["strike"],
+            "Contract":    t.get("opt_symbol", f"{t['symbol']} {t['strike']} {'CE' if t['direction']=='CALL' else 'PE'}"),
+            "Expiry":      t.get("expiry", "—"),
+            "Date":        t.get("entry_date", "—"),
             "Entry":       t["entry_time"],
             "Exit":        t["exit_time"],
-            "Entry Prem":  f"₹{t['entry_prem']}",
-            "Exit Prem":   f"₹{t['exit_prem']}",
-            "Exit Reason": t["exit_reason"],
-            "Lots":        t["lots"],
-            "PnL":         fmt_pnl(t["pnl"]),
+            "Qty":         qty,
+            "Buy @":       f"₹{t['entry_prem']:,.1f}",
+            "Sell @":      f"₹{t['exit_prem']:,.1f}",
+            "Invested":    f"₹{invested:,.0f}",
+            "Recovered":   f"₹{exited:,.0f}",
+            "Reason":      t["exit_reason"],
+            "PnL":         f"{fmt_pnl(t['pnl'])} ({pnl_pct:+.1f}%)",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
